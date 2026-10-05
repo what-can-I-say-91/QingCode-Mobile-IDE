@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#007acc">
+<title>轻码编辑器 QingCode</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='5' fill='%23182236'/%3E%3Ctext x='12' y='16.5' font-family='monospace' font-size='10' font-weight='bold' fill='%234fc3f7' text-anchor='middle'%3E%3C/%3E%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+  <!-- 启动页（v4.9）：双引擎进度条——Python（Pyodide）在上、C++（Termux）在下；
+       Python 就绪后才开始检测/编译 Termux，两条全部完成后才进入主界面 -->
+  <div id="splash">
+    <button id="splash-skip" data-i18n="splash_skip">跳过 →</button>
+    <svg class="splash-logo" viewBox="0 0 64 64" width="72" height="72" aria-hidden="true">
+      <defs><linearGradient id="sbg" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0" stop-color="#4f7cff"/><stop offset="1" stop-color="#9a5cff"/>
+      </linearGradient></defs>
+      <rect x="2" y="2" width="60" height="60" rx="14" fill="url(#sbg)"/>
+      <path d="M24 22 L14 32 L24 42" stroke="#fff" stroke-width="4.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M40 22 L50 32 L40 42" stroke="#fff" stroke-width="4.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M35 18 L29 46" stroke="#ffd166" stroke-width="4" fill="none" stroke-linecap="round"/>
+    </svg>
+    <div class="splash-title"><b data-i18n="about_name">轻码编辑器 QingCode</b><span id="splash-ver">v4.11.2</span></div>
+    <div class="splash-group" id="splash-grp-py">
+      <div class="splash-row"><span class="splash-eng" data-i18n="splash_eng_py">Python 引擎</span><span class="splash-pct" id="splash-py-pct">0%</span></div>
+      <div class="splash-bar"><div id="splash-py-fill" style="width:4%"></div></div>
+      <div class="splash-status" id="splash-py-status" data-i18n="splash_py">正在加载 Python 运行时…</div>
+    </div>
+    <div class="splash-group splash-group-dim" id="splash-grp-cpp">
+      <div class="splash-row"><span class="splash-eng" data-i18n="splash_eng_cpp">C++ 引擎 · Termux</span><span class="splash-pct" id="splash-cpp-pct">—</span></div>
+      <div class="splash-bar"><div id="splash-cpp-fill" style="width:0%"></div></div>
+      <div class="splash-status" id="splash-cpp-status" data-i18n="splash_wait_py">等待 Python 就绪…</div>
+      <div class="splash-hint hidden" id="splash-cpp-hint" data-i18n="splash_tx_slow">若 Termux 加载较慢，请先手动打开 Termux，再重新打开编辑器</div>
+    </div>
+    <div class="splash-tip" data-i18n="splash_tip">首次启动需编译运行时；v4.5 起支持编译缓存，之后启动更快</div>
+  </div>
+
+  <!-- v4.9 跳过确认框：点击右上角「跳过」后弹出，确认才进入主界面（未完成任务后台继续） -->
+  <div id="splash-confirm" class="hidden">
+    <div class="spc-box">
+      <b data-i18n="splash_skip_title">确认跳过加载？</b>
+      <p data-i18n="splash_skip_body">跳过后部分功能可能不可用，界面可能出现短暂卡顿；引擎仍在后台继续准备，就绪后自动可用。</p>
+      <div class="spc-btns">
+        <button id="spc-cancel" data-i18n="spc_cancel">继续等待</button>
+        <button id="spc-ok" data-i18n="spc_ok">确认跳过</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 顶栏 -->
+  <header id="titlebar">
+    <button id="btn-menu" class="icon-btn" data-i18n-title="t_menu_filelist" title="文件列表">
+      <svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M3 6h18v2H3V6m0 5h18v2H3v-2m0 5h18v2H3v-2z"/></svg>
+    </button>
+    <div id="app-logo">
+      <svg viewBox="0 0 24 24" width="18" height="18"><path fill="#4fc3f7" d="M14.6 16.6L19.2 12l-4.6-4.6L16 6l6 6-6 6-1.4-1.4m-5.2 0L4.8 12l4.6-4.6L8 6l-6 6 6 6 1.4-1.4z"/></svg>
+      <span id="app-title" data-i18n="app_title">轻码编辑器</span>
+    </div>
+    <button id="btn-run" class="run-btn" data-i18n-title="t_run" title="运行">
+      <svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M8 5v14l11-7z"/></svg>
+      <span data-i18n="run">运行</span>
+    </button>
+    <button id="btn-more" class="icon-btn" data-i18n-title="t_more" title="更多">
+      <svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M12 16a2 2 0 1 1 0 4 2 2 0 0 1 0-4m0-6a2 2 0 1 1 0 4 2 2 0 0 1 0-4m0-6a2 2 0 1 1 0 4 2 2 0 0 1 0-4z"/></svg>
+    </button>
+  </header>
+
+  <div id="main-area">
+    <!-- 侧栏：文件列表 -->
+    <aside id="sidebar">
+      <div class="sidebar-head">
+        <span data-i18n="explorer">资源管理器</span>
+        <span class="sidebar-actions">
+          <button id="btn-openfile" class="mini-btn" data-i18n-title="t_openfile" title="打开文件">
+            <svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6m-1 7V3.5L18.5 9H13z"/></svg>
+          </button>
+          <button id="btn-openfolder" class="mini-btn" data-i18n-title="t_openfolder" title="打开文件夹（项目空间）">
+            <svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M10 4l2 2h8a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h6z"/></svg>
+          </button>
+          <button id="btn-newfile" class="mini-btn" data-i18n-title="t_newfile" title="新建文件">
+            <svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M13 9h5.5L13 3.5V9M6 2h8l6 6v12a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2m5 8h-2v3H6v2h3v3h2v-3h3v-2h-3v-3z"/></svg>
+          </button>
+        </span>
+      </div>
+      <ul id="file-list"></ul>
+      <div id="sidebar-foot">
+        <div class="foot-row" data-i18n="runtime">运行时状态</div>
+        <div class="foot-item"><span class="dot" id="dot-py"></span>Python <span id="py-state">预加载中</span></div>
+        <div class="foot-item"><span class="dot" id="dot-cpp"></span>C++ <span id="cpp-state">检测中…</span></div>
+      </div>
+    </aside>
+    <div id="sidebar-mask"></div>
+
+    <!-- 编辑器区 -->
+    <div id="editor-pane">
+      <div id="tabbar">
+        <div id="tab" class="tab active">
+          <svg id="tab-fileicon" viewBox="0 0 24 24" width="15" height="15"><path fill="currentColor" d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6z"/></svg>
+          <span id="tab-name">main.py</span>
+          <button id="tab-close" class="tab-x" title="关闭">×</button>
+        </div>
+      </div>
+      <div id="editor-container"></div>
+      <div id="welcome" class="hidden">
+        <div class="welcome-box" data-i18n-html="welcome">
+          <h1>轻码编辑器</h1>
+          <p>QingCode · 移动端轻量代码编辑器</p>
+          <ul>
+            <li>支持 <b>Python</b> 与 <b>C++</b>（Termux 真实编译）</li>
+            <li>点击 <b>▶ 运行</b>，在下方终端中交互输入输出</li>
+            <li>右上角菜单：环境向导 / 引擎切换</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 底部：终端（输出 + 交互输入行） -->
+  <section id="bottom-panel">
+    <div class="panel-tabs">
+      <button id="ptab-output" class="ptab active" data-i18n="terminal">终端</button>
+      <span class="panel-spacer"></span>
+      <button id="btn-clear-out" class="mini-btn" data-i18n-title="t_clear" title="清空输出">
+        <svg viewBox="0 0 24 24" width="15" height="15"><path fill="currentColor" d="M19 4h-3.5l-1-1h-5l-1 1H5v2h14V4M6 19a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V7H6v12z"/></svg>
+      </button>
+      <button id="btn-panel-toggle" class="mini-btn" data-i18n-title="t_toggle" title="收起/展开">
+        <svg viewBox="0 0 24 24" width="15" height="15"><path fill="currentColor" d="M7.4 8.6L12 13.2l4.6-4.6L18 10l-6 6-6-6 1.4-1.4z"/></svg>
+      </button>
+    </div>
+    <div id="output-view">
+      <pre id="output-log"><span class="out-hint" data-i18n="out_hint">// 终端就绪。点击 ▶ 运行当前文件，程序请求输入时会弹窗或在下方输入。</span></pre>
+    </div>
+    <div id="term-input-row">
+      <span id="term-prompt">❯</span>
+      <input id="term-input" data-i18n-ph="ph_term" placeholder="程序运行时可在此交互输入，回车发送" autocomplete="off" autocapitalize="off" spellcheck="false">
+      <button id="btn-send" data-i18n="send">发送</button>
+    </div>
+  </section>
+
+  <!-- 状态栏 -->
+  <footer id="statusbar">
+    <span id="status-lang">Python</span>
+    <span class="status-sep">|</span>
+    <span id="status-engine">Pyodide (WebAssembly)</span>
+    <span class="status-flex"></span>
+    <span id="status-cursor">Ln 1, Col 1</span>
+    <span class="status-sep">|</span>
+    <span id="status-size">字号 14</span>
+  </footer>
+
+  <!-- 对话框 -->
+  <div id="modal-mask" class="hidden">
+    <div id="modal">
+      <div id="modal-title" data-i18n="new_file">新建文件</div>
+      <input id="modal-input" type="text" data-i18n-ph="ph_fname" placeholder="文件名，如 demo.py 或 hello.cpp" autocomplete="off">
+      <div id="modal-error"></div>
+      <div class="modal-btns">
+        <button id="modal-cancel" data-i18n="cancel">取消</button>
+        <button id="modal-ok" data-i18n="ok">确定</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 获取 Termux 对话框 -->
+  <div id="dl-modal" class="hidden">
+    <div id="dl-box">
+      <div id="dl-title" data-i18n="dl_title">获取 Termux 安装包</div>
+      <div id="dl-desc" data-i18n="dl_desc">Termux 用于真实 C++ 编译（一次性安装，之后全离线可用）</div>
+      <button id="dl-github" data-i18n="dl_github">前往 GitHub 下载</button>
+      <button id="dl-email" data-i18n="dl_email">联系开发者获取安装包</button>
+      <div id="dl-email-tip">开发者邮箱已复制：<b>19587486395@163.com</b><br>发邮件时请明确说明「获取 Termux 安装包」需求</div>
+      <button id="dl-close" data-i18n="close">关闭</button>
+    </div>
+  </div>
+
+  <!-- 环境配置对话框（v4.8：C++ / Python 双选项卡；日常由启动自动检测+后台安装维护，此处仅手动备选） -->
+  <div id="init-modal" class="hidden">
+    <div id="init-box">
+      <div id="init-title" data-i18n="cfg_title">环境配置（手动备选）</div>
+      <div class="about-tabs" id="cfg-tabs">
+        <button class="ab-tab active" data-cfg="cpp" data-i18n="cfg_tab_cpp">C++（clang 编译器）</button>
+        <button class="ab-tab" data-cfg="py" data-i18n="cfg_tab_py">Python（解释器）</button>
+      </div>
+      <div id="init-steps-wrap">
+        <div id="cfg-cpp-panel">
+          <div class="cfg-note" data-i18n="cfg_cpp_note">C++ 真实编译需要 clang：应用每次启动会自动检测并在后台安装（保持联网即可），本向导仅作手动备选。</div>
+          <div id="init-steps" data-i18n-html="init_steps">
+        <b>第 1 步（推荐 · 国内加速）</b>：切换清华源——在 Termux 粘贴执行这条命令（长按命令可选中复制）：
+        <div class="init-cmd"><span class="no">1</span>echo "deb https://mirrors.tuna.tsinghua.edu.cn/termux/apt/termux-main stable main" &gt; $PREFIX/etc/apt/sources.list</div>
+        <b>第 2 步</b>：按顺序逐条复制粘贴执行下面 5 条命令——<b>上一条执行完再复制下一条</b>，不要混在一起（长按命令可选中复制）：
+        <div class="init-cmd"><span class="no">2</span>termux-setup-storage</div>
+        <div class="init-note">↑ 首次执行会弹「允许访问」提示，点允许</div>
+        <div class="init-cmd"><span class="no">3</span>mkdir -p ~/.termux</div>
+        <div class="init-cmd"><span class="no">4</span>echo "allow-external-apps=true" &gt;&gt; ~/.termux/termux.properties</div>
+        <div class="init-cmd"><span class="no">5</span>termux-reload-settings</div>
+        <div class="init-cmd"><span class="no">6</span>pkg install -y clang</div>
+        <div class="init-note">↑ 询问 <b>(y/n)</b> 时输入 <b>y</b> 后回车（第 1 步换过源下载更快）</div>
+        <div class="init-cmd"><span class="no">7</span>echo ''; echo '== 初始化完成，请返回轻码编辑器 =='</div>
+        <b>第 3 步</b>：看到「== 初始化完成，请返回轻码编辑器 ==」后返回本应用，菜单 →「⚙️ 配置 C++」→ 立即检测（若提示权限问题，按提示允许「所有文件访问」）。
+          </div>
+        </div>
+        <div id="cfg-py-panel" class="hidden">
+          <div class="cfg-note" data-i18n="cfg_py_note">Termux Python 为设备原生解释器（可 pip 安装任意第三方库）。应用每次启动会自动检测并在后台安装（保持联网即可）；默认 Python 引擎仍是内置 Pyodide，需在菜单「Python 引擎」切换。</div>
+          <div id="py-steps" data-i18n-html="cfg_py_steps">
+        <b>方式一（推荐）</b>：保持联网，应用启动时会<b>自动检测并后台安装</b>，无需手动操作。
+        <b>方式二（手动）</b>：在 Termux 中逐条执行（长按命令可复制）：
+        <div class="init-cmd"><span class="no">1</span>pkg install -y python</div>
+        <div class="init-note">↑ 询问 <b>(y/n)</b> 时输入 <b>y</b> 后回车（换过清华源下载更快）</div>
+        <div class="init-cmd"><span class="no">2</span>pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple</div>
+        <div class="init-note">↑ 可选：pip 换清华源，装第三方库更快</div>
+        <b>使用</b>：菜单 →「Python 引擎」→ 选「Termux Python（原生·可 pip 装库）」，点 ▶ 运行即用真实解释器。
+          </div>
+        </div>
+      </div>
+      <button id="cfg-recheck" data-i18n="cfg_recheck">立即检测并自动配置</button>
+      <button id="init-open" data-i18n="init_open">打开 Termux</button>
+      <button id="init-close" data-i18n="close">关闭</button>
+    </div>
+  </div>
+
+  <!-- 关于对话框（logo + 版本号 + 选项卡） -->
+  <div id="about-mask" class="hidden">
+    <div id="about-card">
+      <div class="about-head">
+        <svg class="about-logo" viewBox="0 0 64 64" width="52" height="52" aria-hidden="true">
+          <defs><linearGradient id="abg" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0" stop-color="#4f7cff"/><stop offset="1" stop-color="#9a5cff"/>
+          </linearGradient></defs>
+          <rect x="2" y="2" width="60" height="60" rx="14" fill="url(#abg)"/>
+          <path d="M24 22 L14 32 L24 42" stroke="#fff" stroke-width="4.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M40 22 L50 32 L40 42" stroke="#fff" stroke-width="4.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M35 18 L29 46" stroke="#ffd166" stroke-width="4" fill="none" stroke-linecap="round"/>
+        </svg>
+        <div class="about-title">
+          <b data-i18n="about_name">轻码编辑器 QingCode</b>
+          <span id="about-ver"></span>
+        </div>
+      </div>
+      <div class="about-tabs">
+        <button class="ab-tab active" data-tab="tos" data-i18n="ab_tos">用户协议</button>
+        <button class="ab-tab" data-tab="credits" data-i18n="ab_credits">使用项目及致谢</button>
+        <button class="ab-tab" data-tab="dev" data-i18n="ab_dev">开发者信息及开源协议</button>
+      </div>
+      <div class="about-body" id="about-body"></div>
+      <div class="about-note" id="about-note"></div>
+      <button id="about-close" data-i18n="close">关闭</button>
+    </div>
+  </div>
+
+  <!-- v4.9 设置页：右上角「⋯」点击后进入的全屏设置界面（原三点菜单升级，全部菜单项按选项卡分组保留） -->
+  <div id="more-menu" class="hidden">
+    <div class="sp-head">
+      <button id="sp-back" class="icon-btn" data-i18n-title="pp_back" title="返回">
+        <svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M20 11H7.8l5.6-5.6L12 4l-8 8 8 8 1.4-1.4L7.8 13H20v-2z"/></svg>
+      </button>
+      <b data-i18n="sp_title">设置</b>
+      <input id="sp-search" type="text" data-i18n-ph="sp_search" placeholder="搜索设置…" autocomplete="off">
+    </div>
+    <div class="sp-tabs" id="sp-tabs">
+      <button class="sp-tab active" data-sp="edit" data-i18n="sp_tab_edit">编辑</button>
+      <button class="sp-tab" data-sp="engine" data-i18n="sp_tab_engine">引擎与 Termux</button>
+      <button class="sp-tab" data-sp="file" data-i18n="sp_tab_file">文件</button>
+      <button class="sp-tab" data-sp="general" data-i18n="sp_tab_general">通用</button>
+    </div>
+    <div class="sp-body">
+      <div class="sp-panel" data-panel="edit">
+        <button id="mi-rename" data-i18n="mi_rename">重命名当前文件</button>
+        <button id="mi-delete" data-i18n="mi_delete">删除当前文件</button>
+        <button id="mi-export" data-i18n="mi_export">导出当前文件</button>
+        <button id="mi-font-plus" data-search="字体 font size" data-i18n="mi_fontp">字号 +</button>
+        <button id="mi-font-minus" data-search="字体 font size" data-i18n="mi_fontm">字号 −</button>
+        <button id="mi-reset" data-i18n="mi_reset">恢复示例代码</button>
+      </div>
+      <div class="sp-panel" data-panel="engine" hidden>
+        <div class="menu-row"><span data-i18n="cpp_engine">C++ 引擎</span><select id="sel-cpp-engine">
+          <option value="auto" data-i18n="eng_auto">自动（Termux 优先）</option>
+          <option value="termux" data-i18n="eng_termux">Termux（真实编译）</option>
+          <option value="online" data-i18n="eng_online">在线编译（免费）</option>
+          <option value="jscpp" data-i18n="eng_jscpp">内置 JSCPP（离线教学）</option>
+        </select></div>
+        <div class="menu-row"><span data-i18n="cpp_compiler">C++ 编译器</span><select id="sel-cpp-compiler">
+          <option value="clang++">clang++</option>
+          <option value="g++">g++</option>
+        </select></div>
+        <div class="menu-row"><span data-i18n="py_engine">Python 引擎</span><select id="sel-py-engine">
+          <option value="pyodide" data-i18n="eng_pyodide">内置 Pyodide（离线）</option>
+          <option value="termux" data-i18n="eng_py_termux">Termux Python（原生·可 pip 装库）</option>
+          <option value="online" data-i18n="eng_online">在线编译（免费）</option>
+        </select></div>
+        <button id="mi-term-session" data-search="终端 terminal shell" data-i18n="mi_term">连接 Termux 终端会话（内嵌）</button>
+        <button id="mi-run-tty" data-i18n="mi_tty">在 Termux 终端中交互运行 C++</button>
+        <hr>
+        <button id="mi-env-dl" data-search="安装 下载 install" data-i18n="mi_envdl">环境向导 ① 获取 Termux</button>
+        <button id="mi-cfg-cpp" data-search="clang 编译器 compiler" data-i18n="mi_cfg_cpp">⚙️ 配置 C++（编译器）</button>
+        <button id="mi-cfg-py" data-search="python pip 解释器" data-i18n="mi_cfg_py">🐍 配置 Python（解释器）</button>
+      </div>
+      <div class="sp-panel" data-panel="file" hidden>
+        <button id="mi-open-folder" data-i18n="mi_openfolder">📂 打开文件夹（项目空间）</button>
+        <button id="mi-open-file" data-i18n="mi_openfile">📄 打开文件（本地）</button>
+        <button id="mi-close-project" style="display:none" data-i18n="mi_closeproj">✖ 关闭项目空间</button>
+        <button id="mi-save-all" style="display:none" data-i18n="mi_saveall">💾 保存全部到项目</button>
+        <button id="mi-autosave" data-i18n="mi_autosave">定时自动保存（30 秒）：开</button>
+        <div class="menu-row"><span data-i18n="encoding">文件编码</span><select id="sel-encoding"></select></div>
+      </div>
+      <div class="sp-panel" data-panel="general" hidden>
+        <button id="mi-plugins" data-i18n="mi_plugins">🧩 插件管理</button>
+        <button id="mi-lang">🌐 语言 / Language</button>
+        <button id="mi-dbg-log" data-i18n="mi_log">导出调试日志（排障）</button>
+        <button id="mi-about" data-i18n="mi_about">关于</button>
+      </div>
+      <div class="sp-panel" data-panel="search" hidden id="sp-search-panel"></div>
+    </div>
+  </div>
+
+  <!-- 插件管理页（v4.6）：顶部选项卡；内置「已加载 / 语言 / 设置」，插件可用 PCPluginAPI.page() 追加自定义选项卡 -->
+  <div id="plugin-page" class="hidden">
+    <div class="pp-head">
+      <button id="pp-back" class="icon-btn" data-i18n-title="pp_back" title="返回">
+        <svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M20 11H7.8l5.6-5.6L12 4l-8 8 8 8 1.4-1.4L7.8 13H20v-2z"/></svg>
+      </button>
+      <b id="pp-title" data-i18n="pp_title">插件管理</b>
+      <span id="pp-count"></span>
+    </div>
+    <div class="pp-tabs" id="pp-tabs">
+      <button class="pp-tab active" data-pp="loaded" data-i18n="pp_tab_loaded">已加载</button>
+      <button class="pp-tab" data-pp="langs" data-i18n="pp_tab_langs">语言</button>
+      <button class="pp-tab" data-pp="settings" data-i18n="pp_tab_settings">设置</button>
+    </div>
+    <div id="pp-body"></div>
+  </div>
+
+  <!-- 语言选择对话框（首启 + 菜单切换共用） -->
+  <div id="lang-mask" class="hidden">
+    <div id="lang-box">
+      <svg viewBox="0 0 64 64" width="46" height="46" aria-hidden="true">
+        <defs><linearGradient id="lbg" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0" stop-color="#4f7cff"/><stop offset="1" stop-color="#9a5cff"/>
+        </linearGradient></defs>
+        <rect x="2" y="2" width="60" height="60" rx="14" fill="url(#lbg)"/>
+        <path d="M24 22 L14 32 L24 42" stroke="#fff" stroke-width="4.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M40 22 L50 32 L40 42" stroke="#fff" stroke-width="4.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+        <path d="M35 18 L29 46" stroke="#ffd166" stroke-width="4" fill="none" stroke-linecap="round"/>
+      </svg>
+      <div id="lang-title">选择语言 · Choose Language</div>
+      <button id="lang-zh">中文</button>
+      <button id="lang-en">English</button>
+      <button id="lang-cancel" class="hidden" data-i18n="cancel">取消</button>
+    </div>
+  </div>
+
+  <script src="i18n.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
