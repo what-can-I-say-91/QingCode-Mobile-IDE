@@ -1,0 +1,24 @@
+# ============================================================
+# 轻码编辑器 QingCode —— .gitattributes（仓库级行尾策略）
+# 目的：任何平台、任何 Git 配置（含 core.autocrlf）下行为一致，
+#       既不再出现「本文件是 LF，但检出时会转成 CRLF」的提示，
+#       也不会出现「整个文件每一行都改了」的假 diff。
+# ============================================================
+
+# 默认：文本文件按 CRLF 检出（Windows 编辑习惯），入库统一存 LF（仓库 diff 干净）
+* text=auto eol=crlf
+
+# shell 脚本必须保持 LF —— Linux/WSL 下执行 ./build.sh，CRLF 会报 bad interpreter
+*.sh text eol=lf
+
+# 第三方运行时资源原样保留，不做任何行尾转换
+web/pyodide/**                -text
+web/vendor/**                 -text
+app/src/main/assets/editor/pyodide/**  -text
+app/src/main/assets/editor/vendor/**   -text
+
+# 二进制资源
+*.png      binary
+*.wasm     binary
+*.zip      binary
+*.keystore binary
