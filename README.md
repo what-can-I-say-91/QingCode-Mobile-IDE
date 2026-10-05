@@ -2,8 +2,6 @@
 
 **中文** · [English](README_EN.md)
 
-**中文** · [English](README_EN.md)
-
 安卓端轻量代码编辑器：**CodeMirror 6 + Pyodide（Python WASM）+ Termux Clang/GCC（真实 C++ 编译）**，WebView 壳完全离线运行，命令行直接构建 APK（**无需 Gradle / Android Studio**）。未配置 Termux 时 C++ 自动回退内置 JSCPP 教学解释器。
 
 **v4.11 当前亮点：Termux 引擎全自动后台维护（启动只检测+发起安装即通过、45s 后台守护循环自动重试、后装 Termux 自动接管、断网 15 分钟自动重发、装好自动就绪）· 自动安装接入清华源（apt 换源 + 索引刷新，pip 源同步自动化）· 内置 Python Worker 化（input() 真终端式逐行交互、可强制中断、对话框模式自动回退）· 运行通道五项根因修复（中断真杀进程、产物会话隔离、轮询防误判）· 右上角「⋯」升级为全屏设置页（编辑 / 引擎与 Termux / 文件 / 通用 四选项卡，原菜单项全部保留）· 启动页双引擎进度条（Python 上 / C++ Termux 下，Python 就绪后才开始检测 Termux）· 启动页右上角「跳过 →」· Termux 原生 Python 引擎 · 配置 C++ / 配置 Python 双选项卡 · 插件管理页（PCPluginAPI v2）· Python 编译缓存 · 说明文件全面双语 · 英文名 QingCode · 启动即主动请求权限 · Termux 后台自动唤醒 · 界面双语 · 失控输出保护 · 免费在线编译引擎 · 项目空间 · 智能补全 · 保存编码可选（含 GBK）。**
