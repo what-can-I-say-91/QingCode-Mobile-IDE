@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.qingcode.editor"
+    android:versionCode="38"
+    android:versionName="4.11.2">
+
+    <uses-sdk android:minSdkVersion="24" android:targetSdkVersion="34" />
+
+    <!-- CDN 兜底与在线资源 -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- 调用 Termux 编译运行 C++ -->
+    <uses-permission android:name="com.termux.permission.RUN_COMMAND" />
+    <!-- 与 Termux 交换代码文件的公共目录访问 -->
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
+
+    <!-- Android 11+ 包可见性：检测 Termux -->
+    <queries>
+        <package android:name="com.termux" />
+    </queries>
+
+    <!-- 注意：requestLegacyExternalStorage 必须保留。Android 10（API 29）只认这个开关，
+         删除后应用会落入分区存储，而 API 29 没有「所有文件访问」权限可授，/sdcard 将不可写；
+         Android 11+ 会自动忽略该属性，保留无副作用。 -->
+    <application
+        android:label="轻码编辑器"
+        android:icon="@mipmap/ic_launcher"
+        android:hardwareAccelerated="true"
+        android:usesCleartextTraffic="false"
+        android:requestLegacyExternalStorage="true"
+        android:theme="@android:style/Theme.Material.NoActionBar">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:windowSoftInputMode="adjustResize"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|smallestScreenSize|uiMode">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>
