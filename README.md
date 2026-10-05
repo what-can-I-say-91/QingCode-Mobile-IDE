@@ -1,10 +1,12 @@
-# 轻码编辑器 QingCode v4.2 · 源码说明
+# 轻码编辑器 QingCode v4.9 · 源码说明
+
+**中文** · [English](README_EN.md)
 
 **中文** · [English](README_EN.md)
 
 安卓端轻量代码编辑器：**CodeMirror 6 + Pyodide（Python WASM）+ Termux Clang/GCC（真实 C++ 编译）**，WebView 壳完全离线运行，命令行直接构建 APK（**无需 Gradle / Android Studio**）。未配置 Termux 时 C++ 自动回退内置 JSCPP 教学解释器。
 
-**v4.2 当前亮点：界面双语（首启选择中文/English，菜单随时切换）· 交换目录失控输出保护（32MB 上限 + 自动清理）· 免费在线编译引擎（Wandbox/Judge0 双兜底）· 项目空间（打开文件夹 + 自动保存）· 智能补全 · 错误行标注跳转与编辑消红 · 停止立即生效 · 保存编码可选（含 GBK）。**
+**v4.9 当前亮点：右上角「⋯」升级为全屏设置页（编辑 / 引擎与 Termux / 文件 / 通用 四选项卡，原菜单项全部保留）· 启动时检测 Termux，未安装则禁用全部 Termux 编译项目并提示仅可使用部分功能 · 启动页右上角「跳过 →」（确认后直接进入，未完成任务后台继续）· 启动页双引擎进度条（Python 上 / C++ Termux 下，Python 就绪后才开始检测并编译 Termux）· Termux 环境自动维护（检测 + 后台注入安装）· 配置 C++ / 配置 Python 双选项卡 · Termux 原生 Python 引擎 · 插件管理页（PCPluginAPI v2）· Python 编译缓存 · 说明文件全面双语 · 英文名 QingCode · 启动即主动请求权限 · Termux 后台自动唤醒 · 界面双语 · 失控输出保护 · 免费在线编译引擎 · 项目空间 · 智能补全 · 保存编码可选（含 GBK）。**
 
 **v3.0 奠定的基础：交互式输入输出（非预设式）、编译器启动提速（多级缓存）、依赖自动安装。**
 
@@ -16,7 +18,7 @@
 | 功能 | 说明 |
 |---|---|
 | 🌍 界面双语 | 首次启动选择中文/English，右上角菜单随时切换 |
-| 🐍 Python 离线运行 | 内置 Pyodide（CPython 3.12 WASM），`input()` 弹窗实时交互 |
+| 🐍 Python 离线运行 | 内置 Pyodide（CPython 3.12 WASM，后台 Worker 线程），`input()` 终端式逐行交互（对话框模式自动回退） |
 | ⚙️ C++ 真实编译 | Termux clang++/g++ 离线编译，终端实时交互 + 流式输出 |
 | ☁️ 免费在线编译 | Wandbox + Judge0 双引擎兜底，零配置联网即用 |
 | 🧠 智能补全 | 关键词/已导入库成员/头文件名，前缀过滤、输入法组合作业友好 |
@@ -30,7 +32,7 @@
 
 ## 下载 APK
 
-前往 [Releases](../../releases) 下载最新 `轻码编辑器-QingCode-v4.2.apk`（版本历史见下文版本表）。完整使用教程见 [QingCode-使用说明.md](QingCode-使用说明.md)。
+前往 [Releases](../../releases) 下载最新 `轻码编辑器-QingCode-v4.9.apk`（版本历史见下文版本表）。完整使用教程见 [使用说明.md](使用说明.md)（English: [使用说明_EN.md](使用说明_EN.md)）。
 
 ## 架构
 
@@ -67,9 +69,11 @@ QingCode-源码/
 │   ├── vendor/cpp-worker.js    # JSCPP Worker（超时可终止）
 │   └── pyodide/                # Pyodide 0.26.4 core（CPython 3.12 标准库，5 文件）
 ├── build.sh                    # 一键构建（自动组装 assets → aapt2 → javac → d8 → 签名）
+├── plugins/                    # v4.4 插件接口：接口说明（中/英）+ 语言插件示例骨架（插件放手机 /sdcard/QingCode/plugins/）
 ├── debug.keystore              # 调试签名（口令见 build.sh；缺失时构建自动生成）
 ├── LICENSE                     # MIT 许可证（含开发者联系方式与问题反馈邮箱）
 ├── 使用说明.md                  # 面向使用者的完整教程（安装/配置/常见问题）
+├── 使用说明_EN.md               # User guide in English（与中文版内容对应）
 ├── .gitignore                  # GitHub 上传用（Android 模板 + 构建产物排除）
 └── 截图/                       # v1.0 ~ v3.4 界面截图
 ```
@@ -113,7 +117,7 @@ cd web && python3 -m http.server 8899
 
 # 构建 APK
 ANDROID_SDK_ROOT=/opt/android-sdk ./build.sh
-# 产物：build/QingCode.apk（versionName 4.2 / versionCode 22）
+# 产物：build/QingCode.apk（versionName 4.11 / versionCode 36）
 ```
 
 依赖：JDK 11+、Android SDK（build-tools;34.0.0、platforms;android-34）。首次构建自动生成 `debug.keystore`（口令见 build.sh）。
@@ -130,7 +134,7 @@ ANDROID_SDK_ROOT=/opt/android-sdk ./build.sh
 | 流式轮询间隔 | `MainActivity.java` 200ms handler |
 | 超时时长 | 前端 `Android.runCpp(…, 60)` 与 Termux 脚本内 `timeout 50` |
 | C++ 示例代码 | `web/app.js` 顶部 `CPP_DEFAULT_CODE`（STL 交互版）/ `CPP_JSCPP_CODE`（兜底兼容版） |
-| 应用名 / 版本号 | `AndroidManifest.xml`（当前 versionCode 22 / versionName 4.2）+ `web/app.js` `APP_VERSION` |
+| 应用名 / 版本号 | `AndroidManifest.xml`（当前 versionCode 36 / versionName 4.11）+ `web/app.js` `APP_VERSION` |
 | 界面文案双语 | `web/i18n.js` 字典（`data-i18n` 系列属性驱动）；新增界面元素时加属性 + 双语 key |
 | 失控输出阈值 | `MainActivity.java` `pollTask()`（32MB）与 `termPoll`（64MB）、`cleanSwapTemp()` |
 
@@ -182,5 +186,17 @@ npm pack JSCPP@2.0.9 && npx esbuild lib/commonjs.js --bundle --global-name=JSCPP
 | **v4.1.3** | z（交换目录失控输出保护 + 临时文件自动清理） | **三重防护治理 `/sdcard/QingCode/` 交换目录残留**（用户实测死循环打印使 `.stdout` 膨胀至 614.86MB）：①**运行中超限保护**——轮询发现 `.stdout` 超 32MB 立即杀 `.prog.pid`/`.keep.pid` 进程，终端输出 `⏹ timeout exit 125（输出超过 32MB 上限，已自动停止，疑似死循环打印等失控输出）`；②**结束后自动清理**——编译失败/运行结束/超时三分支结束后自动删除 `.stdout/.stderr/.compile.exit/.run.exit/.prog.pid/.keep.pid/.termux.log/.pc_in/.term_out` 与交换目录下源码副本（保留 `源码/` 与 `.app.log`）；③**启动清理**——App 启动即清掉上次残留（旧版 615MB 巨型 `.stdout` 装上即被清掉）；④**终端会话保护**——Termux 会话 `.term_out` 超 64MB 自动断开会话并提示；修复 `stopTermSession` 提取为 `stopTermSessionInternal`（内部类与轮询线程共用）；versionCode 20 |
 | **v4.1.4** | z（初始化向导逐条命令化） | **「环境向导 ②」初始化指引改为逐条命令展示**：原来第 2 步是一条 `;` 串联的复合初始化命令（`termux-setup-storage; mkdir…; pkg install…`）+「一键复制」按钮整串复制；现拆为 **7 条独立命令**（清华源 1 条 + 初始化 6 条：setup-storage / mkdir / allow-external-apps / reload-settings / pkg install clang / 完成提示 echo），每条独立代码块、左侧序号标签（`position:absolute` + `user-select:none`，序号不会被选中混入复制内容），按顺序从上到下执行、上一条执行完再复制下一条；**去掉「一键复制」按钮**（用户长按自行复制），每条命令下附灰色小字说明（首次弹「允许访问」点允许、`(y/n)` 输 y）；`INIT_CMD` 复合串重构为 `INIT_CMDS` 数组（浏览器降级提示同步逐条输出）；versionCode 21 |
 | **v4.2** | y（界面双语：中文 / English） | **首次启动弹出语言选择对话框**（logo + 双语标题，「中文」「English」两按钮，选择持久化 `localStorage('pc_lang')`，不选不进主界面）；**之后可随时切换**：更多菜单新增「🌐 语言 / Language」入口（对话框带「取消」，可关闭不改）；**界面全量双语**——新增 `web/i18n.js`（中英字典 120+ key + `t()`/`applyLang()`，静态节点 `data-i18n`/`data-i18n-html`/`data-i18n-title`/`data-i18n-ph` 四类属性驱动替换），覆盖顶栏/侧栏/欢迎页/终端面板/状态栏/通用对话框/获取 Termux/初始化向导（含 7 条命令步骤全文）/关于页三选项卡/更多菜单全部菜单项与引擎下拉选项，及动态文案（Pyodide 状态、新建/重命名/删除对话框、文件名校验提示、权限引导、Termux 指引、恢复示例、编码切换、自动保存开关等 20+ 处 `t()` 改造）；切换即时生效无需重启，刷新后持久保持；终端程序输出内容不参与翻译（程序输出保持原样）；Playwright 实测六场景（首启弹窗/English 生效/菜单切换/中文恢复/刷新持久/英文下向导+新建+关于页全英文）全过，修复批量替换产生的 5 处 `data-i18n` 属性缺失闭合引号导致 `mi-rename` 等元素解析异常；versionCode 22 |
-
-
+| **v4.3** | y（更名 QingCode + 权限引导重构 + Termux 后台唤醒） | **英文名由 PocketCode 更名为 QingCode**（规避与知名项目重名；「轻码」拼音直译，中英文完全对应；中文显示名「轻码编辑器」不变）——包名 `com.pocketcode.editor` → `com.qingcode.editor`、交换目录 `/sdcard/PocketCode/` → `/sdcard/QingCode/`、日志 TAG 与导出文件名、签名证书 CN、构建产物名、README/使用说明/LICENSE 全量同步；**启动即主动请求权限**（权限未齐时每次启动都引导，直到授权成功）：`onCreate` 新增 `requestPermissionsOnLaunch()`——Android 11+ 先弹「Termux 运行命令」运行时授权窗口、批准后在 `onRequestPermissionsResult` 自动衔接跳转「所有文件访问」设置页（两个引导不同时抢屏），被系统「不再询问」的权限自动改跳应用详情设置页手动开启（修复 RUN_COMMAND 死路：旧版提示「请批准弹窗」但系统永远不再弹窗），Android 10 及以下合并请求写存储 + RUN_COMMAND（code 40）；`onResume` 授权回流检测——从设置页开完权限返回后自动重新探测并刷新前端环境状态（存储由不可写变可写即触发 `probeTermux()`），无需重启或手动检测；**Termux 后台自动唤醒**：`sendRunCommand` 前新增 `wakeTermux()`，先发一条无害后台命令（`sh -c true`）拉起 RunCommandService/TermuxService，Termux 进程被系统杀掉后点编译/运行即自动后台拉起再入队执行，无需先手动打开 Termux（唤醒日志在系统拦截 startService 时提示关闭电池优化/加自启动白名单）；versionCode 23 |
+| **v4.4** | y（插件接口预留 + 首启提速） | **插件接口预留（PCPluginAPI v1，插件由用户自行开发）**：新增 `web/app.js` `PluginHost`/`window.PCPluginAPI`——`register(meta)` 注册插件（`languages` 注册语言：扩展名并入「新建文件」白名单且 ▶ 运行按扩展名分流到插件 `onRun(file, code, langDef, api)`；`menu` 注册「更多菜单」项；`onInit` 加载回调）；能力通道：`out`/`meta`/`toast`/`copy`/`storage(id)` 隔离存储、**`execTermux(script, bg)` 底层原语**（任意 Termux 脚本）与 **`runCapture(script)` 高层封装**（输出重定向到交换目录临时文件 + 300ms 轮询 + 自动清理，120s 超时，返回 `Promise<{code, output}>`）；原生新增 7 个桥方法：`listPlugins`（列 `/sdcard/QingCode/plugins/*.js`）/`readPlugin`/`execTermux`/`readSwapFile`/`writeSwapFile`/`deleteSwapFile`/`showToast`（交换目录文件读写均防路径穿越：限名字符集 + canonical path 校验）；插件以 `new Function('PCPluginAPI', src)` 隔离加载、报错不影响主程序；接口文档与语言插件骨架见源码 `plugins/`（`插件接口说明.md` + `example-lang-plugin.js`，build.sh 同步打入源码快照）；**首启提速**——定位卡顿根因为启动 800ms 即开始预加载 Pyodide（约 10MB WASM 编译抢满 CPU 数秒致 UI 冻结）：预加载延后至 3.5s；`onCreate` 给 WebView 设置主题底色 `#1e1e1e` 消除启动白屏；`onResume` 的存储写测试移至后台线程（主线程不再做磁盘 IO）；versionCode 24 |
+| **v4.5** | y（Python 编译缓存 + 说明文件双语） | **Python 运行时编译缓存**：`ensurePyodide` 加载前挂接 `WebAssembly.instantiateStreaming` 钩子——`pyodide.asm.wasm`（约 10MB）的编译结果 `WebAssembly.Module` 持久化到 IndexedDB（键含 URL 与字节数，升级自动失效重建），**下次冷启动直接 `new WebAssembly.Instance(cachedModule)` 跳过整个编译阶段**（加载耗时大头），状态栏显示加载耗时并在命中缓存时提示「编译缓存命中」；说明：V8 编译产物为引擎内部对象，只能存于应用内部持久存储（IndexedDB），交换目录无法承载——效果即「编译状态跨冷启动快速调用」，HTTP 层资源缓存头（wasm 7 天 / js 1 天）原生侧早已有之；**说明文件全面双语**：新增 `使用说明_EN.md`（英文版使用说明全文）与 `plugins/Plugin-API-Guide_EN.md`（插件接口英文版），中文版顶部加中英切换行，README/使用说明/插件文档三份说明全部中英对照；versionCode 25 |
+| **v4.6** | y（启动页 + 插件管理页 + 插件接口 v2） | **启动页（Python 就绪前不进主界面）**：新增全屏启动页（logo + 版本号 + 进度条 + 阶段状态文字），启动即触发 Python 运行时加载并实时显示进度（加载 pyodide.mjs → 初始化解释器平滑爬升 8%→85% → 就绪 100%），**就绪后才进入主界面**；取代 v4.4 的「预加载延后 3.5s」方案——启动页本身就是等待 UI，编译占用 CPU 不再有「卡顿感」，且进入应用即可秒跑 Python；**失败/超时兜底**：加载失败或 90s 超时显示「跳过加载，直接进入」按钮（不锁死应用，后台继续加载，进入后 Python 可用照常）；`ensurePyodide` 支持 `onProgress` 进度回调；v4.5 编译缓存命中后二次冷启动进度飞快；**插件管理页（更多菜单 → 🧩 插件管理）**：全屏页面 + **顶部选项卡**——内置「已加载」（插件卡片：名称/版本/作者/描述/id/来源文件 + 启用状态与启停按钮）/「语言」（插件注册语言表格）/「设置」（插件接口与目录信息 + **插件系统总开关** + 预留说明）；**预留 API（PCPluginAPI 升级 v2）**：`page(tabId, { title, render(container, api) })` 向管理页注册自定义选项卡（惰性渲染，内置选项卡不可覆盖）、meta 新增 `author`/`description`/`homepage`/`onUnload` 标准字段（管理页展示）、**插件启停**：`localStorage('pc_plugins_disabled')` 按文件名禁用 + `pc_plugins_enabled` 总开关，`loadPlugins` 跳过禁用插件（重启生效），管理页可切换并 toast 提示；versionCode 26 |
+| **v4.7** | y（Termux 原生 Python 引擎） | **Termux Python 成为 Python 的第三个引擎**（菜单「Python 引擎」新增「Termux Python（原生·可 pip 装库）」，与内置 Pyodide / 在线编译并列）：复用 C++ 的整套 Termux 基建（RUN_COMMAND + wakeTermux 后台唤醒 + mkfifo 交互管道 + 200ms 增量轮询 + 32MB 失控输出保护 + 超时强杀），新增原生桥 `runPyTermux`——**无编译阶段**，`python -X utf8 -u` 直接解释执行交换目录中的 .py（`-u` 实时流式输出，`-X utf8` 避免编码问题）；**配置语句与 C++ 完全分离**：python 缺失时运行脚本自动 `pkg install -y python`（联网一次），与 C++ 的 clang 安装、初始化向导互不影响；`input()` 交互与 C++ 一致（终端输入行写 FIFO 逐行实时）；项目模式下所有 .py 平铺写入交换目录，同目录模块可直接 import（复杂包结构建议 site-packages 或 Termux 终端）；停止键与 C++ 同路径即时终止；versionCode 27 |
+| **v4.11** | y（Termux 引擎全自动后台维护：检测→安装→重试，零等待） | **Termux Python / clang 的检测与安装全程后台化，启动零等待**——①**启动页只检测+发起安装即通过**：删除 C++（Termux）阶段「等待安装完成（最长 5 分钟）」的逻辑，检测到组件缺失立即后台发起 `pkg install` 并直接进入主界面（进度条直接显示「仍在后台安装，先进入软件」）；②**后台守护循环** `startTermuxGuard()`（每 45s 一轮）：启动检测失败 / Termux 忙碌静默下轮重试；组件缺失幂等补发 `pkg install`（dpkg 对已装包 no-op、Termux 队列串行无并发冲突）；**15 分钟仍未装好自动重发**（断网/中断自愈）；**全部就绪 → `probeTermux()` 刷新引擎下拉、终端提示「引擎已就绪」、循环自动停止**；③**后装 Termux 自动接管**：守护循环每轮静默刷新 `getEnv()`（不动编辑器 UI、不打断输入法），Termux 后装切回 App 后 ≤45s 自动检测安装，无需重启；④状态机 init→installing→ok 支持回环（就绪后组件被卸载可重新自愈）；运行时脚本内自动安装兜底保留（双保险）；versionCode 36 |
+| **v4.10** | y（内置 Python Worker 化：真终端式 input + 可强制中断） | **内置 Pyodide 移入后台 Worker（`web/py-worker.js`，module Worker），input() 变成真终端**——①**终端式逐行输入**：`input("提示语")` 的提示文字经 raw stdout 逐字节收集 + `TextDecoder` 流式解码**实时显示在输出区**（无换行提示语在等待输入前冲刷），光标自动聚焦底部终端输入行，逐行输入回车即发，与 C++/Termux Python 体验完全一致，不再弹对话框；跨线程同步用 `SharedArrayBuffer` + `Atomics.wait/notify` 握手（CTRL 状态字 0 等待/1 有行/2 EOF + 64KB 数据区），`setStdin` 挂接阻塞读行函数，Python 侧真正睡眠等输入、零轮询；②**修复示例代码 `NameError: name '_pi' is not defined`**（v4.9.4 补丁 `del` 掉了闭包运行时需要的模块全局 → 改 `_pc_make_input()` 工厂闭包捕获；主线程回退模式保留修复补丁，Worker 模式用原生 input() 不再需要补丁）；③**内置 Python 可强制中断**：独立线程运行，「停止」即 `Worker.terminate()` 强杀 + 全状态复位，无限循环秒杀，下次运行自动重启（WASM 编译缓存 IndexedDB 跨线程共享，重启仍快）；④**自动回退**：`crossOriginIsolated === false`（无跨域隔离头）时回退主线程 + 对话框模式；versionCode 35 |
+| **v4.9.4** | z（修复：运行通道——中断真杀进程 + 产物隔离 + 轮询防误判） | **针对中断/串跑问题的五项根因全部修复**。①**「停止」真正杀死 Termux 进程**：旧实现只把 kill 排进 Termux 命令队列，队列被长脚本占住时 kill 永远轮不到执行——现在运行脚本内置**看门狗**子进程（0.5s 轮询），点停止时 App 直接向会话目录写 `.cancel` 标记文件（跨应用零延迟），看门狗立即杀 编译(`.compile.pid`)/运行(`.prog.pid`)/保活(`.keep.pid`) 三类进程并终结脚本释放队列，队列 kill 仅作兜底；顺带修复 cancelCpp 里 `rm -f $HOME/.pc_in` 用错旧 FIFO 名的 bug；②**产物隔离补全**：编译二进制改为会话独立 `pc_prog_<会话>.out`（旧版共用 `$HOME/.pc_prog.out`，且排查发现**md5 缓存未命中分支从不把新二进制放到运行路径——实际跑的是上一个项目残留的旧程序**，这正是「运行的是默认项目」的元凶之一），缓存写入改「临时文件+原子替换」杜绝 ETXTBSY 与半写入；③**轮询严格判定**：`.run.exit` 必须非空且为 0~255 合法退出码才算结束（0 字节/半写入/FUSE 延迟内容不再误判 exit=0 秒完成），会话目录丢失直接报告终止、绝不回退根目录读残留旧文件（`currentRunDir()` 移除 exists 回退）；④**清理保护**：带 `.active` 标记的活跃/排队会话目录不再被 cleanSwapTemp 误删，运行结束只精准 purge 自己的会话目录（新增 `purgeRunDir`），开新运行自动补发 .cancel 给上一个存活会话（僵尸自愈），历史会话 24h 自动清理；⑤**input() 提示语**：重写内置 Python `builtins.input`，`input("提示")` 的提示文字传入输入对话框并回显输出区（原 setStdin 回调拿不到提示语）；附带修复 `__onCppResult` 中 `window.__pyTermuxRun` 被 finishCpp 提前清空导致 Termux Python 完成文案永远走 C++ 分支的时序 bug；versionCode 34 |
+| **v4.9.3** | z（修复：多项目运行串项目） | **修复「有多个 C++ 项目时运行的是默认项目而非当前项目，有时又好了」**。根因：此前所有运行共用同一交换目录，而 Termux 命令是**异步排队执行**的——连续运行两个项目（尤其默认同名 main.cpp）时，后写入的文件覆盖先运行脚本要读的文件，`.stdout` 等产物也交叉污染；Termux 响应快（队列不积压）时就正常，所以「有时又好了」。修复：**运行会话目录隔离**——每次运行创建独立 `.run_<时间戳>` 子目录，主文件、项目头文件/同目录模块（新增 `beginRunSession` / `saveFileIn` / `endRunSession` 桥）、编译产物与输出全部落在会话目录内；轮询读取与「停止」按会话目录定位；FIFO 管道名按会话唯一化（`$HOME/.pc_in_<会话>`）；历史会话目录在下次启动时统一清理；Termux Python 引擎同机制修复；versionCode 33 |
+| **v4.9.2** | z（启动页提示） | **Termux 慢加载提示**：启动页 C++（Termux）阶段持续 15 秒仍未完成时，在该进度条下方显示琥珀色小字提示「若 Termux 加载较慢，请先手动打开 Termux，再重新打开编辑器」——Termux 冷启动/初始化慢时用户有了明确的处置办法；阶段正常完成或未装 Termux 秒过时提示不出现（不打扰），阶段结束/跳过进入后自动消失；versionCode 32 |
+| **v4.9.1** | z（设置页细节优化） | **选中的设置选项卡变蓝**：文字亮蓝 + 淡蓝背景 + 蓝色下划线，切换即时跟随；**设置头部收窄**（41px → 35px），返回按钮固定 28px 方块，只有碰到按钮本身才退出，不再有大片误触区；**头部空位改为设置搜索框**：输入即跨「编辑 / 引擎与 Termux / 文件 / 通用」四个选项卡过滤全部设置项（支持别名：搜「字体」命中「字号」、搜「clang」命中「配置 C++」），点按钮类结果直接触发功能、下拉类结果自动跳到对应选项卡并高亮 1.5 秒，无结果显示空态提示，打开/关闭设置页自动清空；versionCode 31 |
+| **v4.9** | y（全屏设置页 + Termux 缺失禁用 + 启动页跳过确认） | **右上角「⋯」升级为全屏设置页**：点击后直接进入全屏设置界面（不再弹下拉小菜单），原有全部菜单项按「编辑 / 引擎与 Termux / 文件 / 通用」四个选项卡分组保留（引擎与编译器下拉、获取 Termux、配置 C++ / Python、终端会话、项目空间、编码、插件、语言、调试日志、关于等一项不少），返回键或「⋯」关闭；**启动时检测 Termux 是否安装**：未安装则取消所有 Termux 编译项目——C++ 与 Python 引擎下拉中的 Termux 选项置灰禁用、已保存为 Termux 的引擎自动回退（C++ → 自动降级 / Python → 内置 Pyodide），进入主界面后终端与状态栏提示「缺少 Termux，仅可使用部分功能」，运行 Termux 类功能（真实编译 / Termux Python / 终端会话 / 交互运行）统一拦截并给出安装指引；**启动页右上角常驻「跳过 →」**：点击弹确认对话框（「跳过后部分功能可能不可用，界面可能出现短暂卡顿；引擎仍在后台继续准备」），确认后直接进入主界面，未完成的加载 / 安装任务在后台继续；versionCode 30 |
+| **v4.8.1** | z（启动页双引擎进度条） | **启动页改为「Python + C++」双进度条**：Python（Pyodide）在上、C++（Termux）在下（各自标签/百分比/状态文字，C++ 条绿色渐变区分，等待期间置灰）；**严格顺序加载**——Python 引擎就绪（或失败/90s 超时）后，才启动 C++ Termux 阶段：检测 python/clang → 缺失自动注入 `pkg install` 并**在启动页等待安装完成**（每 8s 复检，最长等 5 分钟；超时转后台继续安装并自动进入，装好后自动刷新引擎状态）；**未装 Termux / 浏览器环境秒过**（显示「未检测到 Termux，已跳过」），不拖慢进入；取代 v4.8 的「boot 末尾 2.5s 后台静默检测」——检测前置可视、等待有兜底，任一引擎失败仍可「跳过进入」不锁死；versionCode 29 |
+| **v4.8** | y（Termux 环境自动维护 + 配置对话框双选项卡） | **每次启动自动检测并配置 Termux**：boot 末尾（Python 运行时就绪、界面与插件等主要准备工作完成后，延迟 2.5s 不阻塞）执行 `autoTermuxSetup()`——向 Termux 后台发送检测脚本（`command -v python / clang`，经 runCapture 通道捕获结果），**Python 或 clang 缺失即自动在后台注入 `pkg install -y python / clang`**（终端留痕、不弹窗、不阻塞；Termux 未安装或无权限时静默跳过；runCapture 120s 超时保护）；**「配置 C++」「配置 Python」双选项卡**：三点菜单原「环境向导 ② 初始化」「③ 重新检测」两项合并升级为「⚙️ 配置 C++」「🐍 配置 Python」两个入口，点击打开同一个配置对话框（顶部 C++ / Python 选项卡）——C++ 选项卡保留原初始化 7 条命令向导，Python 选项卡为 `pkg install -y python` + pip 清华源换源命令 + 引擎切换说明，两选项卡共用「立即检测并自动配置」按钮（手动触发同一检测注入流程）；**自动化仍是主路径**：运行时脚本内的自动安装兜底（C++ 与 Termux Python 均有）保留，手动向导仅为备选；versionCode 28 |
