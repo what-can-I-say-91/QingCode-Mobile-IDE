@@ -64,6 +64,17 @@ QingCode-源码/
 │   ├── vendor/JSCPP.js         # JSCPP 兜底引擎（esbuild 打包，含 stream/util shim）
 │   ├── vendor/cpp-worker.js    # JSCPP Worker（超时可终止）
 │   └── pyodide/                # Pyodide 0.26.4 core（CPython 3.12 标准库，5 文件）
+├── licenses/                   #使用的开源项目开源协议
+│   ├──BSL-1.0-Wandbox.txt
+│   ├──GPL-3.0.txt
+│   ├──MIT-CodeMirror.txt
+│   ├──MIT-Emscripten.txt
+│   ├──MIT-JSCPP.txt
+│   ├──MIT-lodash.txt
+│   ├──MPL-2.0.txt
+│   ├──NOTICE-Termux.txt
+│   ├──PSF-2.0-CPython.txt
+│   └──README.md
 ├── build.sh                    # 一键构建（自动组装 assets → aapt2 → javac → d8 → 签名）；并生成 assets/source 源码快照（含 res 图标与 vendor/JSCPP.js，仅排除 Pyodide 二进制）
 ├── plugins/                    # v4.4 插件接口：接口说明（中/英）+ 语言插件示例骨架（插件放手机 /sdcard/QingCode/plugins/）
 ├── debug.keystore              # 调试签名（口令见 build.sh；缺失时构建自动生成）
