@@ -28,7 +28,7 @@
 
 ## 下载 APK
 
-前往 [Releases](../../releases) 下载最新 `轻码编辑器-QingCode-v4.11.2.apk`（版本历史见下文版本表）。完整使用教程见 [使用说明.md](使用说明.md)（English: [使用说明_EN.md](使用说明_EN.md)）。
+前往 [Releases](../../releases) 下载最新 `QingCode-v4.11.2.apk`（版本历史见下文版本表）。完整使用教程见 [使用说明.md](使用说明.md)（English: [使用说明_EN.md](使用说明_EN.md)）。
 
 ## 架构
 
