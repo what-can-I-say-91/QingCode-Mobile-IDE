@@ -27,10 +27,11 @@ fi
 
 # v3.3：打包源代码到 assets/source（运行时释放到 /sdcard/QingCode/源码/）
 # 排除 Pyodide 二进制资源（14M），源码包保持轻量；pyodide 可从官方 release 获取
+# v4.11.2：一并打包第三方开源许可证 licenses/（随源码释放，便于用户查阅）
 echo "[0.5/6] 打包源码到 assets/source"
 SRC_OUT="$PROJ/app/src/main/assets/source"
 rm -rf "$SRC_OUT"
-mkdir -p "$SRC_OUT/web/vendor" "$SRC_OUT/app/src/main/java/com/qingcode/editor" "$SRC_OUT/app/src/main/res" "$SRC_OUT/plugins"
+mkdir -p "$SRC_OUT/web/vendor" "$SRC_OUT/app/src/main/java/com/qingcode/editor" "$SRC_OUT/app/src/main/res" "$SRC_OUT/plugins" "$SRC_OUT/licenses"
 cp "$PROJ/web/app.js" "$PROJ/web/index.html" "$PROJ/web/style.css" "$SRC_OUT/web/"
 cp "$PROJ/web/i18n.js" "$PROJ/web/py-worker.js" "$SRC_OUT/web/"
 cp "$PROJ/web/vendor/cm6.js" "$PROJ/web/vendor/cpp-worker.js" "$SRC_OUT/web/vendor/"
@@ -38,6 +39,7 @@ cp "$PROJ/web/vendor/JSCPP.js" "$SRC_OUT/web/vendor/"
 cp "$PROJ/app/src/main/java/com/qingcode/editor/MainActivity.java" "$SRC_OUT/app/src/main/java/com/qingcode/editor/"
 cp "$PROJ/app/src/main/AndroidManifest.xml" "$SRC_OUT/app/src/main/"
 cp -r "$PROJ/app/src/main/res/." "$SRC_OUT/app/src/main/res/"
+cp -r "$PROJ/licenses/." "$SRC_OUT/licenses/"
 cp "$PROJ/build.sh" "$PROJ/README.md" "$PROJ/README_EN.md" "$PROJ/使用说明.md" "$PROJ/使用说明_EN.md" "$PROJ/LICENSE" "$SRC_OUT/"
 cp "$PROJ/plugins/插件接口说明.md" "$PROJ/plugins/Plugin-API-Guide_EN.md" "$PROJ/plugins/example-lang-plugin.js" "$SRC_OUT/plugins/"
 cp "$PROJ/debug.keystore" "$SRC_OUT/"
