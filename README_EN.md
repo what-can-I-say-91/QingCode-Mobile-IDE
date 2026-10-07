@@ -28,7 +28,7 @@ A lightweight Android code editor: **CodeMirror 6 + Pyodide (Python WASM) + Term
 
 ## Download APK
 
-Grab the latest `轻码编辑器-QingCode-v4.11.2.apk` from [Releases](../../releases) (see the version table below for history).The full user guide: [使用说明_EN.md](使用说明_EN.md) (English) / [使用说明.md](使用说明.md) (Chinese).
+Grab the latest `QingCode-v4.11.2.apk` from [Releases](../../releases) (see the version table below for history).The full user guide: [使用说明_EN.md](使用说明_EN.md) (English) / [使用说明.md](使用说明.md) (Chinese).
 
 ## Architecture
 
