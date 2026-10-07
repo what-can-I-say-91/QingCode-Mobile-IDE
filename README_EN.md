@@ -63,7 +63,18 @@ QingCode-源码/
 │   ├── vendor/cm6.js           # CodeMirror 6 bundle (esbuild, 560KB)
 │   ├── vendor/JSCPP.js         # JSCPP fallback engine (esbuild bundle, stream/util shims)
 │   ├── vendor/cpp-worker.js    # JSCPP worker (terminable on timeout)
-│   └── pyodide/                # Pyodide 0.26.4 core (CPython 3.12 stdlib, 5 files)
+│   └── pyodide/
+licenses/                   
+│   ├──BSL-1.0-Wandbox.txt
+│   ├──GPL-3.0.txt
+│   ├──MIT-CodeMirror.txt
+│   ├──MIT-Emscripten.txt
+│   ├──MIT-JSCPP.txt
+│   ├──MIT-lodash.txt
+│   ├──MPL-2.0.txt
+│   ├──NOTICE-Termux.txt
+│   ├──PSF-2.0-CPython.txt
+│   └──README.md             # Pyodide 0.26.4 core (CPython 3.12 stdlib, 5 files)
 ├── build.sh                    # one-click build (assemble assets → aapt2 → javac → d8 → sign); also generates the assets/source snapshot (incl. res icons and vendor/JSCPP.js; only Pyodide binaries are excluded)
 ├── plugins/                    # v4.4 plugin interface: API docs (zh/en) + language-plugin skeleton (plugins go into /sdcard/QingCode/plugins/ on the phone)
 ├── debug.keystore              # debug signing key (password hardcoded in build.sh; auto-generated if missing)
