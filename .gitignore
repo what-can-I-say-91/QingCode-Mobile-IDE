@@ -75,6 +75,7 @@ app/src/main/assets/source/
 # AI 助手工作目录（记忆 / 内部笔记，不随仓库发布）
 .workbuddy/
 
-# E2E 临时浏览器配置
+# E2E 临时工作目录（跑完会自删，留个保险）
 tests/e2e/.e2e-prof/
 tests/e2e/.termux-prof/
+tests/e2e/.tmp-quoting/

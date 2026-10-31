@@ -6,6 +6,49 @@ Full version history of the QingCode editor. The versioning scheme (x/y/z) lives
 
 ## Recent releases (v5.x)
 
+### v5.10.1 Updates (z · 12 security-review fixes)
+
+All items from the external security review (main @63f277d) are addressed. **Several behaviours change — read "Behaviour changes" before upgrading.**
+
+**P0 (critical)**
+
+1. **Plugins no longer get network/workspace by default**: new plugins start with nothing granted, and legacy records migrate to least privilege too (re-tick what they need).
+2. **Main-thread plugin permission checkboxes became a read-only notice**: such a plugin can call the native bridge directly, so tick boxes only implied isolation that does not exist.
+3. **Termux commands need confirmation**: a native dialog shows the first 200 characters; declining or timing out means nothing runs, once per session. Background environment checks use a **fixed, argument-less probe**, so startup does not prompt.
+4. **Writes into the plugin directory are refused natively**: `writeProjectFile` now blocks `/sdcard/QingCode/plugins/`; only the install flow can write there.
+5. **CSP added**: `object-src 'none'`, `base-uri 'none'`, and `connect-src` limited to the app itself plus Wandbox / Judge0; `'unsafe-eval'` (plugins) and `'wasm-unsafe-eval'` (Pyodide) are kept.
+6. **Sandbox workers are cut off from the network**: `sandbox-worker.js` responses now carry `Content-Security-Policy: connect-src 'none'`, so a plugin cannot exfiltrate anything from the sandbox.
+7. **Plugin loading is TOCTOU-free**: new `readPluginVerified` / `readPluginCopyVerified` return content and hash from a single read; anything that does not match the approval record is refused.
+8. **No more silent main-thread Python**: without cross-origin isolation the app refuses to run (in that mode `import js` reaches the native bridge) and points at the Termux / online engines.
+
+**P1 (important)**
+
+9. `runCppEx` writes with the validated relative path and re-checks that the canonical path stays inside the session directory.
+10. `.qingcode.json` hardened: `compiler` accepts only an executable name (no `/`, no `..`); `env` rejects `LD_PRELOAD` / `LD_LIBRARY_PATH` / `LD_AUDIT` / `PATH`; **the first run of a project with a config asks for confirmation**, remembered per project + config fingerprint (editing the config asks again).
+11. The Termux script copies the session sources into app-private `$HOME/.pc_work/<session>` first, so **hashing and compiling only ever use that private copy** — tampering with shared storage no longer changes build inputs.
+12. Online plugin install shows the **SHA-256 hash plus the first 50 lines** first, and only writes to the plugin directory after a second confirmation.
+
+**P2 (docs & build)**
+
+13. README now states that with `allow-external-apps=true`, **any app holding `RUN_COMMAND` can execute commands in Termux** (not just this one), and that online compilation is an outbound transfer, off by default.
+14. `build.sh`: missing optional files (`TODO.md`, …) no longer abort packaging; and **`RELEASE=1` with `debug.keystore` is refused outright**.
+
+**Behaviour changes**
+
+- Third-party plugins that used to run on default permissions become **unapproved** after upgrading and need their scopes re-ticked; main-thread plugins just need one "approve" click.
+- The first run of a project with `.qingcode.json` adds one confirmation (asked once per config).
+- The first Termux compile/run after each launch asks once for command confirmation.
+- Without cross-origin isolation the built-in Python engine now refuses to run instead of silently using the main thread.
+
+**Verification**
+
+- New `tests/e2e/e2e-security.mjs` (13 checks): the app still boots under CSP, permission defaults, the main-thread notice, refusal on hash mismatch, config hardening and first-run confirmation, install confirmation.
+- New `tests/e2e/termux-quoting.sh` (6 checks): the quoting used by the generated script really works in a shell, including Chinese and spaced paths.
+- Build passes at `versionCode 60 / 5.10.1`. **The real SAF and Termux channels still need on-device verification.**
+
+- versionCode: 5.10.1 (60).
+
+
 ### v5.10.0 Updates (y · SAF workspace + build/execution split)
 
 The last two foundational stages of the roadmap land: the workspace moves to a system folder grant, and building is fully separated from running.

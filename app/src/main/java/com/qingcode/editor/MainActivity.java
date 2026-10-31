@@ -270,6 +270,12 @@ public class MainActivity extends Activity {
                 h.put("Cross-Origin-Resource-Policy", "cross-origin");
                 // 大文件长缓存（wasm/js/zip），让 WebView 磁盘缓存 + WASM 编译缓存生效
                 h.put("Cache-Control", cacheControlOf(asset));
+                /* 安全审查 P0-5：沙箱 Worker 只允许执行代码，禁止任何网络访问与外链资源。
+                   这样即使插件在 Worker 内拿到源码，也无法把内容外传。 */
+                if (asset.endsWith("sandbox-worker.js")) {
+                    h.put("Content-Security-Policy",
+                            "default-src 'none'; script-src 'unsafe-eval'; connect-src 'none'");
+                }
                 WebResourceResponse resp = new WebResourceResponse(mimeOf(asset), "utf-8", is);
                 resp.setResponseHeaders(h);
                 return resp;
@@ -600,8 +606,21 @@ public class MainActivity extends Activity {
             cppFifoName = ".pc_in_" + sessSan;
             if (cppFifoName.length() < 7) cppFifoName = ".pc_in";
             cppBinName = sessSan.isEmpty() ? "" : "pc_prog_" + sessSan + ".out";
-            if (!writeFile(new File(dir, fileName), code)) {
-                alog("runCppEx: FAIL write " + new File(dir, fileName).getAbsolutePath());
+            /* 安全审查 P1-7：写盘用 safeRelativePath 校验过的 entryRel（不是原始 fileName），
+               并再确认规范化路径仍落在会话目录内。 */
+            File entryFile = new File(dir, entryRel);
+            try {
+                if (!entryFile.getCanonicalPath().startsWith(dir.getCanonicalPath() + File.separator)) {
+                    alog("runCppEx: rejected entry outside session dir: " + entryRel);
+                    emitCpp(cppJson("setup", false, 0, "", "主文件路径非法：" + fileName));
+                    return true;
+                }
+            } catch (Exception e) {
+                emitCpp(cppJson("setup", false, 0, "", "主文件路径无法解析：" + fileName));
+                return true;
+            }
+            if (!writeFile(entryFile, code)) {
+                alog("runCppEx: FAIL write " + entryFile.getAbsolutePath());
                 emitCpp(cppJson("setup", false, 0, "", "无法写入交换目录 " + dir.getAbsolutePath()));
                 return true;
             }
@@ -615,16 +634,20 @@ public class MainActivity extends Activity {
 
             /* ---- 字面量参数（全部在生成期用单引号包好，运行时按字面传递，不经二次解析） ---- */
             StringBuilder srcLit = new StringBuilder();
-            for (String r : rels) { if (srcLit.length() > 0) srcLit.append(' '); srcLit.append(q(r)); }
+            for (String r : rels) {
+                if (srcLit.length() > 0) srcLit.append(' ');
+                /* 用 "$W/" + 单引号文件名拼接：既能展开变量，又不会被文件名里的 $ 之类干扰 */
+                srcLit.append("\"$W/\"").append(q(r));
+            }
             StringBuilder hashLit = new StringBuilder();
             for (String r : rels) {
-                hashLit.append(" echo ").append(q("== " + r)).append("; cat -- ").append(q(r)).append(" 2>/dev/null;");
+                hashLit.append(" echo ").append(q("== " + r)).append("; cat -- \"$W/\"").append(q(r)).append(" 2>/dev/null;");
             }
             StringBuilder incLit = new StringBuilder();
             JSONArray incs = o.optJSONArray("includeDirs");
             if (incs != null) for (int i = 0; i < incs.length(); i++) {
                 String d = safeRelativePath(incs.optString(i, ""));
-                if (d != null) incLit.append(" -I").append(q(d));
+                if (d != null) incLit.append(" -I\"$W/\"").append(q(d));
             }
             StringBuilder flagLit = new StringBuilder();
             JSONArray flags = o.optJSONArray("flags");
@@ -649,7 +672,7 @@ public class MainActivity extends Activity {
                 }
             }
             String cwdRel = safeRelativePath(o.optString("cwd", ""));
-            String cwdLine = (cwdRel == null) ? "cd \"$PC\"" : "cd \"$PC/" + cwdRel + "\" 2>/dev/null || cd \"$PC\"";
+            String cwdLine = (cwdRel == null) ? "cd \"$W\"" : "cd \"$W/" + cwdRel + "\" 2>/dev/null || cd \"$PC\"";
 
             /* ---- 运行段落（重跑时原样复用，故只依赖变量与字面量） ---- */
             String runTail =
@@ -677,6 +700,7 @@ public class MainActivity extends Activity {
                 "CACHE=\"$HOME/.pc_cache\"\n" +
                 "PC_MAX_ENTRIES=" + maxEntries + "\n" +
                 "PC_MAX_KB=" + (maxMB * 1024) + "\n" +
+                "W=\"$HOME/.pc_work/" + (sessSan.isEmpty() ? "adhoc" : sessSan) + "\"\n" +
                 "CXX=" + q(cxx) + "\n" +
                 "PCSTD=" + q("-std=" + std) + "\n" +
                 "prune_cache() {\n" +
@@ -697,6 +721,10 @@ public class MainActivity extends Activity {
                 "echo \"[$(date +%H:%M:%S)] termux script start\" >> \"$PC/.termux.log\"\n" +
                 "cd \"$PC\" || { echo \"[$(date +%H:%M:%S)] cd FAILED\" >> \"$PC/.termux.log\"; exit 9; }\n" +
                 "if [ -f \"$PC/.cancel\" ]; then rm -f \"$PC/.cancel\"; echo \"[$(date +%H:%M:%S)] cancelled while queued\" >> \"$PC/.termux.log\"; exit 0; fi\n" +
+                /* 安全审查 P1-9：交换目录在共享存储里，别的应用可以改。先整份复制到应用私有目录，
+                   之后的哈希与编译都只针对这份私有副本。 */
+                "rm -rf \"$W\"; mkdir -p \"$W\"\n" +
+                "cp -a \"$PC\"/. \"$W\"/ 2>/dev/null\n" +
                 watchdogScript() +
                 "command -v \"$CXX\" >/dev/null 2>&1 || { echo '[首次运行：自动安装编译器，约1-3分钟...]'; pkg install -y " +
                 (cxx.equals("g++") ? "clang" : "clang") + " 2>&1 | tail -1; }\n" +
@@ -775,6 +803,9 @@ public class MainActivity extends Activity {
                 "PCBIN=" + q(pcBin) + "\n" +
                 "BIN=\"$HOME/$PCBIN\"\n" +
                 "CACHE=\"$HOME/.pc_cache\"\n" +
+                /* 重跑复用同一段运行脚本，它引用了 $W（cwd 基准），这里补上定义 */
+                "W=\"$HOME/.pc_work/rerun\"\n" +
+                "mkdir -p \"$W\" 2>/dev/null\n" +
                 "H=" + q(lastCacheKey) + "\n" +
                 "echo \"[$(date +%H:%M:%S)] rerun (no compile) key=$H\" >> \"$PC/.termux.log\"\n" +
                 "cd \"$PC\" || exit 9\n" +
@@ -1197,7 +1228,123 @@ public class MainActivity extends Activity {
         /** 通用 Termux 命令执行（插件运行其他语言的底层原语；返回 false = 未发出，如被系统拦截） */
         @JavascriptInterface
         public boolean execTermux(final String script, final boolean background) {
+            if (script == null) return false;
+            /* 安全审查 P0-2：Termux 命令执行前必须由用户确认一次（每个会话一次）。
+               这是原生桥层的能力，插件拿到的 API 裁剪不能替代这一层。 */
+            if (!ensureTermuxConfirmed(script)) {
+                alog("execTermux: denied (user or timeout)");
+                return false;
+            }
             return sendRunCommand(script, background);
+        }
+
+        /** 安全审查 P0-2：固定探针——不接受参数，因此可以跳过确认；插件即使调用也做不了别的。
+         *  结果写到固定的交换目录文件，前端用 readEnvProbe() 轮询（后台环境检测不该弹确认框）。 */
+        @JavascriptInterface
+        public boolean probeTermuxEnv() {
+            try {
+                File out = new File(swapDir(), PROBE_OUT_NAME);
+                try { if (out.exists()) out.delete(); } catch (Exception ignored) { }
+                String script = "exec > " + q(out.getAbsolutePath()) + " 2>&1\n"
+                        + TERMUX_PROBE_SCRIPT + "\necho DONE\n";
+                return sendRunCommand(script, true);
+            } catch (Exception e) { alog("probeTermuxEnv EX " + e); return false; }
+        }
+
+        /** 读取固定探针的输出（未生成返回 ""） */
+        @JavascriptInterface
+        public String readEnvProbe() {
+            try {
+                File f = new File(swapDir(), PROBE_OUT_NAME);
+                return f.isFile() ? readTextFile(f) : "";
+            } catch (Exception e) { return ""; }
+        }
+
+        /** 安全审查 P0-6：一次读取同时给出内容与哈希。
+         *  旧实现是「先 pluginInfo 算哈希、再 readPlugin 读内容」，两次读取之间文件可被替换（TOCTOU）。 */
+        @JavascriptInterface
+        public String readPluginVerified(String name) {
+            try {
+                if (name == null || !name.matches("[A-Za-z0-9_\\.\\-]+\\.js")) return "";
+                File f = new File(new File(swapDir(), "plugins"), name);
+                if (!f.isFile()) return "";
+                byte[] raw = readBytes(f);
+                if (raw == null) return "";
+                java.security.MessageDigest md = java.security.MessageDigest.getInstance("SHA-256");
+                byte[] h = md.digest(raw);
+                StringBuilder sb = new StringBuilder(h.length * 2);
+                for (byte b : h) sb.append(Character.forDigit((b >> 4) & 0xF, 16)).append(Character.forDigit(b & 0xF, 16));
+                return new org.json.JSONObject()
+                        .put("content", new String(raw, "UTF-8"))
+                        .put("sha256", sb.toString())
+                        .toString();
+            } catch (Exception e) { alog("readPluginVerified EX " + e); return ""; }
+        }
+
+        /** 安全审查 P0-6：私有副本的一次性校验读取（用于「共享文件已更新、仍跑已批准副本」的情形） */
+        @JavascriptInterface
+        public String readPluginCopyVerified(String name) {
+            try {
+                if (name == null || !name.matches("[A-Za-z0-9_\\.\\-]+\\.js")) return "";
+                File f = new File(pluginCacheDir(), name);
+                if (!f.isFile()) return "";
+                byte[] raw = readBytes(f);
+                if (raw == null) return "";
+                java.security.MessageDigest md = java.security.MessageDigest.getInstance("SHA-256");
+                byte[] h = md.digest(raw);
+                StringBuilder sb = new StringBuilder(h.length * 2);
+                for (byte x : h) sb.append(Character.forDigit((x >> 4) & 0xF, 16)).append(Character.forDigit(x & 0xF, 16));
+                return new org.json.JSONObject()
+                        .put("content", new String(raw, "UTF-8"))
+                        .put("sha256", sb.toString())
+                        .toString();
+            } catch (Exception e) { alog("readPluginCopyVerified EX " + e); return ""; }
+        }
+
+        /** 一次性把文件读成字节（与哈希同源，避免二次读取） */
+        private byte[] readBytes(File f) {
+            java.io.FileInputStream in = null;
+            try {
+                in = new java.io.FileInputStream(f);
+                java.io.ByteArrayOutputStream bo = new java.io.ByteArrayOutputStream();
+                byte[] buf = new byte[16 * 1024];
+                int n;
+                while ((n = in.read(buf)) > 0) bo.write(buf, 0, n);
+                return bo.toByteArray();
+            } catch (Exception e) { return null; }
+            finally { try { if (in != null) in.close(); } catch (Exception ignored) { } }
+        }
+
+        /** 安全审查 P0-2：会话内首次执行 Termux 命令前弹原生确认框（显示命令前 200 字）。
+         *  JS 桥跑在非 UI 线程，这里用 latch 等用户选择；拒绝或超时返回 false。 */
+        private boolean ensureTermuxConfirmed(String script) {
+            if (termuxConfirmed) return true;
+            if (termuxConfirming) return false;          // 并发调用：第二次直接拒绝，避免堆叠弹窗
+            termuxConfirming = true;
+            final boolean[] yes = new boolean[]{false};
+            final java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(1);
+            final String preview = script.length() > 200 ? script.substring(0, 200) + "…" : script;
+            runOnUiThread(new Runnable() {
+                @Override public void run() {
+                    try {
+                        new AlertDialog.Builder(MainActivity.this)
+                                .setTitle("允许在 Termux 中执行命令？")
+                                .setMessage("本次会话首次执行外部命令，请确认内容：\n\n" + preview)
+                                .setPositiveButton("允许（本次会话）", (d, w) -> { yes[0] = true; latch.countDown(); })
+                                .setNegativeButton("拒绝", (d, w) -> { yes[0] = false; latch.countDown(); })
+                                .setCancelable(false)
+                                .show();
+                    } catch (Exception e) {
+                        alog("execTermux confirm EX " + e);
+                        latch.countDown();
+                    }
+                }
+            });
+            try { latch.await(90, java.util.concurrent.TimeUnit.SECONDS); }
+            catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+            termuxConfirming = false;
+            if (yes[0]) { termuxConfirmed = true; alog("execTermux: confirmed by user"); }
+            return yes[0];
         }
 
         /** v5.0：删除用户插件文件（仅 `/sdcard/QingCode/plugins/<name>.js`，防路径穿越） */
@@ -1393,6 +1540,20 @@ public class MainActivity extends Activity {
 
         @JavascriptInterface
         public boolean writeProjectFile(String path, String content, String encoding) {
+            /* 安全审查 P0-2：插件目录只能经 writePlugin（安装流程）写入。
+               否则任何能写项目文件的能力都能把 .js 塞进插件目录。 */
+            try {
+                if (path != null) {
+                    File plugins = new File(swapDir(), "plugins").getCanonicalFile();
+                    File target = new File(path).getCanonicalFile();
+                    if (target.getPath().equals(plugins.getPath())
+                            || target.getPath().startsWith(plugins.getPath() + File.separator)) {
+                        lastWriteError = "插件目录只能通过「安装插件」写入";
+                        alog("writeProjectFile: blocked write into plugins dir: " + path);
+                        return false;
+                    }
+                }
+            } catch (Exception ignored) { }
             /* v5.10.0：SAF 走 ContentResolver，不再依赖绝对路径与「所有文件访问」 */
             String[] saf = safSplit(path);
             if (saf != null) {
@@ -2039,6 +2200,15 @@ public class MainActivity extends Activity {
     private long stderrOffset = 0;           // stderr 增量偏移（此前每 200ms 整份重读）
     private final StringBuilder errBuf = new StringBuilder();   // 增量累积，编译失败时交由前端解析
     private volatile String lastWriteError = "";   // v5.10.0：最近一次写失败原因（SAF 用）
+    /* v5.10.1 安全（审查 P0-2）：Termux 命令执行的会话级确认 */
+    private volatile boolean termuxConfirmed = false;
+    private volatile boolean termuxConfirming = false;
+    private static final String PROBE_OUT_NAME = ".env_probe.txt";
+    private static final String TERMUX_PROBE_SCRIPT =
+            "echo py:$(command -v python >/dev/null 2>&1 && echo ok || echo missing);"
+          + "echo cpp:$(command -v clang >/dev/null 2>&1 && echo ok || echo missing);"
+          + "echo src:$(grep -qs \"mirrors.tuna.tsinghua.edu.cn\" \"$PREFIX/etc/apt/sources.list\" && echo ok || echo missing);"
+          + "echo termux:ok";
     private String lastCacheKey = "";        // 上次编译产物缓存键（编译/运行分离）
     private String lastRunTail = "";         // 运行段落脚本（重跑时复用，免去重新编译）
 

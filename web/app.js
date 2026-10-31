@@ -8,7 +8,7 @@
 'use strict';
 
 /* ---------- 常量 ---------- */
-const APP_VERSION = '5.10.0';
+const APP_VERSION = '5.10.1';
 const PYODIDE_VERSION = '0.26.4';
 /* v5.4.1 安全（审查 #6）：移除 jsDelivr 兜底——CDN 加载无 SRI，可被网络层替换；
    本项目自带 web/pyodide/，本地缺失时应直接报错而不是静默从外部拉取代码。 */
@@ -99,6 +99,7 @@ let pyodide = null;
 let pyState = 'idle';
 /* v4.10 内置 Python Worker 通道（终端式交互输入） */
 let pyMode = null;               // 'worker' | 'main'（首次 ensurePyodide 时按环境决定）
+let pyMainBlocked = false;       // v5.10.1：主线程回退已被禁用（安全审查 P0-4）
 let pyWorker = null;
 let pyWorkerOk = false;
 let pyWorkerLoadPromise = null;
@@ -965,8 +966,9 @@ async function ensurePyodide(opts) {
   if (pyMode === 'worker') {
     const ok = await ensurePyWorker(opts);
     if (ok === true) return true;
-    // worker 初始化失败 → 本会话起回退主线程模式（含 wasm 缓存，仍可用对话框输入）
+    // v5.10.1 安全（审查 P0-4）：worker 初始化失败不再回退到主线程执行用户代码
     pyMode = 'main';
+    pyMainBlocked = true;
     setPyState('idle');
   }
   return ensurePyodideMain(opts);
@@ -1384,6 +1386,7 @@ function runCppTermux() {
   if (!target) { outAppend('找不到可运行的 C++ 文件。\n', 'out-err'); return; }
   const cfg = ProjectConfig.get();
   ProjectConfig.report();
+  if (!ProjectConfig.ensureApproved()) return;   // 安全审查 P1-8：首次运行带配置的项目需要确认
   const cxx = cfg.compiler || cppCompiler;
   const sources = ProjectConfig.extraSources(target.name);
   if (cfg.entry && cfg.entry !== state.active) outMeta(t('qc_using_entry').replace('{f}', cfg.entry));
@@ -1794,6 +1797,8 @@ function setRunning(v, kind) {
  * v5.10.0：项目配置 `.qingcode.json` + 运行会话状态机
  * ============================================================ */
 const PROJECT_CONFIG_FILE = '.qingcode.json';
+/* 安全审查 P1-8：可注入行为的环境变量一律拒绝 */
+const QC_ENV_BLOCKED = ['LD_PRELOAD', 'LD_LIBRARY_PATH', 'LD_AUDIT', 'PATH'];
 /** 项目配置：只做解析 + 校验，不执行任何东西；解析失败一律回落到默认值并报告原因 */
 const ProjectConfig = {
   _cacheKey: null, _cfg: null, _errs: [],
@@ -1842,7 +1847,8 @@ const ProjectConfig = {
       cfg.includeDirs.push(d.replace(/\/+$/, ''));
     }
     if (obj.compiler != null) {
-      if (typeof obj.compiler !== 'string' || !/^[A-Za-z0-9_.+\/-]+$/.test(obj.compiler)) errs.push(t('qc_bad_field').replace('{f}', 'compiler'));
+      /* 安全审查 P1-8：只允许裸可执行名（clang++ / g++ / c++），禁止路径与 .. */
+      if (typeof obj.compiler !== 'string' || !/^[A-Za-z0-9_.+-]+$/.test(obj.compiler)) errs.push(t('qc_bad_field').replace('{f}', 'compiler'));
       else cfg.compiler = obj.compiler.trim();
     }
     if (obj.standard != null) {
@@ -1855,6 +1861,8 @@ const ProjectConfig = {
       if (typeof obj.env !== 'object' || Array.isArray(obj.env)) errs.push(t('qc_bad_field').replace('{f}', 'env'));
       else for (const k of Object.keys(obj.env)) {
         if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) { errs.push(t('qc_bad_field').replace('{f}', 'env.' + k)); continue; }
+        /* 安全审查 P1-8：这些变量能改变动态链接器 / 命令解析，等于绕过编译器本身 */
+        if (QC_ENV_BLOCKED.indexOf(k.toUpperCase()) >= 0) { errs.push(t('qc_env_blocked').replace('{f}', k)); continue; }
         const v = obj.env[k];
         if (typeof v !== 'string' && typeof v !== 'number' && typeof v !== 'boolean') { errs.push(t('qc_bad_field').replace('{f}', 'env.' + k)); continue; }
         cfg.env[k] = String(v);
@@ -1899,6 +1907,48 @@ const ProjectConfig = {
   extraSources(entry) {
     const cfg = this.get();
     return cfg.sources.filter(s => s !== entry);
+  },
+  /** 配置指纹：项目路径 + 配置内容哈希 + 长度（安全审查 P1-8：按「项目 + 配置」记住确认结果） */
+  approvalKey() {
+    const text = this.source();
+    if (text === null) return null;
+    let h = 5381;
+    for (let i = 0; i < text.length; i++) h = ((h * 33) ^ text.charCodeAt(i)) >>> 0;
+    return (projectMode() ? projectRoot : 'default') + '#' + h.toString(16) + '#' + text.length;
+  },
+  approved() {
+    const k = this.approvalKey();
+    if (!k) return true;
+    try { return (JSON.parse(localStorage.getItem('pc_qc_approved') || '[]') || []).indexOf(k) >= 0; }
+    catch (e) { return false; }
+  },
+  markApproved() {
+    const k = this.approvalKey();
+    if (!k) return;
+    try {
+      const arr = JSON.parse(localStorage.getItem('pc_qc_approved') || '[]') || [];
+      if (arr.indexOf(k) < 0) arr.push(k);
+      localStorage.setItem('pc_qc_approved', JSON.stringify(arr.slice(-20)));
+    } catch (e) {}
+  },
+  /** 带配置的项目首次运行前确认一次（配置变了会重新确认） */
+  ensureApproved() {
+    if (this.source() === null) return true;      // 没有配置文件，不需要确认
+    if (this.approved()) return true;
+    const cfg = this.get();
+    const bits = [];
+    if (cfg.compiler) bits.push('compiler = ' + cfg.compiler);
+    if (cfg.standard) bits.push('standard = ' + cfg.standard);
+    if (cfg.flags.length) bits.push('flags = ' + cfg.flags.join(' '));
+    if (cfg.args.length) bits.push('args = ' + cfg.args.join(' '));
+    if (cfg.cwd) bits.push('cwd = ' + cfg.cwd);
+    if (Object.keys(cfg.env).length) bits.push('env = ' + JSON.stringify(cfg.env));
+    showModal({
+      title: t('qc_confirm_title'), withInput: false, okText: t('qc_confirm_ok'),
+      desc: t('qc_confirm_desc') + '  ' + bits.join(' · '), showCancel: true
+    });
+    modalMode = 'qc-approve';
+    return false;
   },
   report() {
     const errs = this.errors();
@@ -2018,6 +2068,14 @@ async function runCurrent() {
     if (pyEngine === 'online') {
       if (projectMode()) outMeta('提示：在线引擎暂不支持 import 项目内其他文件；需项目内互相调用请切换 Python 引擎为「内置 Pyodide」。');
       await runPythonOnline(); setRunning(false); return;
+    }
+    /* v5.10.1 安全（审查 P0-4）：主线程模式下用户代码 `import js` 就能调 js.Android.execTermux，
+       等于绕过插件权限与 Termux 确认。缺少跨域隔离时不再静默回退，直接拒绝运行并说明原因。 */
+    if (!pyWorkerSupported() || pyMode === 'main') {
+      outAppend('⚠ ' + t('py_no_isolation') + '\n', 'out-err');
+      outMeta(t('py_no_isolation_hint'));
+      setRunning(false);
+      return;
     }
     const ok = await ensurePyodide();
     if (!ok) { setRunning(false); return; }
@@ -3421,7 +3479,8 @@ window.PCPluginAPI = {
  * ============================================================ */
 const PLUGIN_TRUST_KEY = 'pc_plugin_trust';
 const PLUGIN_PERM_KEYS = ['storage', 'network', 'workspace', 'termux'];
-const PLUGIN_DEFAULT_PERMS = { storage: false, network: true, workspace: true, termux: false };
+/* v5.10.1 安全（审查 P0-1）：默认全 false——网络与工作区读写也必须由用户显式勾选 */
+const PLUGIN_DEFAULT_PERMS = { storage: false, network: false, workspace: false, termux: false };
 const pluginInfos = new Map();   // name -> { name, size, mtime, sha256, cacheSha256 }（本次启动读取）
 
 function normPerms(p) {
@@ -3503,20 +3562,41 @@ function isPluginSandboxed(name) {
   return SandboxHost.inlineList().indexOf(name) < 0;
 }
 /** 取可执行源码：批准版本优先用私有副本；否则用共享文件并同步留底 */
-function resolvePluginSource(name, info, state) {
-  if (state === 'stale-shared') {
-    let c = ''; try { c = (Android.readPluginCopy && Android.readPluginCopy(name)) || ''; } catch (e) { c = ''; }
-    return c || null;
-  }
-  let src = '';
-  try { src = Android.readPlugin(name) || ''; } catch (e) { src = ''; }
-  if (!src) return null;
+/**
+ * 安全审查 P0-6：读取插件源码时，内容与哈希必须来自「同一次读取」。
+ * 旧实现先由 pluginInfo 算一次哈希、再由 readPlugin 读一次内容，两次之间文件可被替换（TOCTOU）。
+ * 返回 { content, sha256 }；不一致或读不到返回 null（调用方必须拒绝执行）。
+ */
+function readVerifiedPlugin(name, fromCopy) {
   try {
-    if (window.Android && Android.cachePluginCopy && (!info || info.cacheSha256 !== info.sha256)) {
-      Android.cachePluginCopy(name, src);   // 批准版本留底，共享目录以后被改也能继续跑这份
-    }
-  } catch (e) {}
-  return src;
+    const fn = fromCopy ? 'readPluginCopyVerified' : 'readPluginVerified';
+    if (!(window.Android && Android[fn])) return null;
+    const raw = Android[fn](name);
+    if (!raw) return null;
+    const o = JSON.parse(raw);
+    if (!o || typeof o.content !== 'string' || !o.sha256) return null;
+    return { content: o.content, sha256: String(o.sha256) };
+  } catch (e) { return null; }
+}
+function resolvePluginSource(name, info, state) {
+  const rec = PluginTrust.get(name);
+  if (!rec || !rec.sha256) return null;
+  const fromCopy = state === 'stale-shared';
+  const v = readVerifiedPlugin(name, fromCopy);
+  if (!v) return null;
+  /* 内容与批准记录不一致 → 拒绝执行（宁可让插件停用，也不执行没批准过的代码） */
+  if (v.sha256 !== String(rec.sha256)) {
+    if (Android.appendLog) Android.appendLog('js', 'plugin hash mismatch on read: ' + name);
+    return null;
+  }
+  if (!fromCopy) {
+    try {
+      if (window.Android && Android.cachePluginCopy && (!info || info.cacheSha256 !== v.sha256)) {
+        Android.cachePluginCopy(name, v.content);   // 用同一份内容留底，共享目录以后被改也能继续跑这份
+      }
+    } catch (e) {}
+  }
+  return v.content;
 }
 /** 旧版信任数据迁移：只有「此前确实被用户启用过」的插件才继承授权（迁移时记录当前哈希） */
 function migrateLegacyPluginTrust(infos) {
@@ -3532,7 +3612,9 @@ function migrateLegacyPluginTrust(infos) {
     if (!n || all[n] || !info.sha256) continue;
     if (seen.indexOf(n) < 0 || disabled.indexOf(n) >= 0) continue;
     PluginTrust.approve(n, info,
-      { storage: true, network: true, workspace: true, termux: true },   // 旧版没有权限模型，实际等同全权
+      /* v5.10.1 安全（审查 P0-1）：迁移不再默认全权，一律按最小权限记 false；
+         用户需要在插件管理页重新勾选需要的权限 */
+      { storage: false, network: false, workspace: false, termux: false },
       inline.indexOf(n) >= 0 ? 'inline' : 'sandbox');
     migrated++;
   }
@@ -4131,6 +4213,31 @@ function pluginTrustSection(name) {
   }
   box.appendChild(head);
 
+  /* v5.10.1 安全（审查 P0-1）：主线程插件根本不受权限约束——它能直接摸到 window.Android，
+     勾选框只会给人「已隔离」的错觉。这里改成只读提示，不提供可勾选项。 */
+  const inlineMode = !isPluginSandboxed(name);
+  if (inlineMode) {
+    const warn = document.createElement('div');
+    warn.className = 'pp-card-meta';
+    warn.style.color = '#f0cd8a';
+    warn.textContent = t('pp_trust_inline_note');
+    box.appendChild(warn);
+    if (rec && (state === 'approved' || state === 'stale-shared')) {
+      const v = document.createElement('div'); v.className = 'pp-card-meta';
+      v.textContent = '(v' + (rec.version || 1) + ')';
+      box.appendChild(v);
+      return box;
+    }
+    const foot0 = document.createElement('div'); foot0.className = 'pp-card-foot';
+    const btn0 = document.createElement('button');
+    btn0.className = 'pp-btn pp-btn-primary';
+    btn0.textContent = t('pp_trust_approve');
+    btn0.addEventListener('click', function () { approvePlugin(name, normPerms(PLUGIN_DEFAULT_PERMS)); });
+    foot0.appendChild(btn0);
+    box.appendChild(foot0);
+    return box;
+  }
+
   if (rec && (state === 'approved' || state === 'stale-shared')) {
     const p = normPerms(rec.permissions);
     const granted = PLUGIN_PERM_KEYS.filter(k => p[k]);
@@ -4142,7 +4249,7 @@ function pluginTrustSection(name) {
     return box;
   }
 
-  /* 未授权 / 内容已变化：逐项勾选权限后授权 */
+  /* 未授权 / 内容已变化：逐项勾选权限后授权（默认全不勾） */
   const pick = document.createElement('div'); pick.className = 'pp-perm-pick';
   const dft = normPerms(PLUGIN_DEFAULT_PERMS);
   const boxes = {};
@@ -4285,6 +4392,7 @@ function renderSettingsTab(body) {
   body.appendChild(reserve);
 }
 /** v5.9.0：从 HTTPS 链接安装插件。只负责下载与落盘，授权仍需用户在卡片上勾选权限。 */
+let pendingInstall = null;   // v5.10.1（审查 P1-10）：等待用户确认的安装任务
 async function installPluginFromUrl(url) {
   const u = String(url || '').trim();
   if (!/^https:\/\/[^\s]+$/i.test(u)) { outAppend('⚠ ' + t('pp_install_bad_url') + '\n', 'out-err'); return false; }
@@ -4307,6 +4415,40 @@ async function installPluginFromUrl(url) {
     return false;
   }
   clearTimeout(timer);
+  /* 安全审查 P1-10：安装前先给出指纹与源码片段，再让用户确认一次。
+     下载完成不等于可信——这一步就是给「来源是否可信」留一个明确的判断点。 */
+  let hex = '';
+  try { hex = await sha256Hex(text); } catch (e) { hex = ''; }
+  const lines = String(text).split('\n').slice(0, 50).join('\n');
+  pendingInstall = { name: name, text: text, hex: hex };
+  showModal({
+    title: t('pp_install_confirm_title'), withInput: false, okText: t('pp_install_confirm_ok'),
+    desc: t('pp_install_confirm_desc')
+      .replace('{name}', name)
+      .replace('{h}', hex ? hex.slice(0, 16) + '…' : '?')
+      + '\n\n' + lines,
+    showCancel: true
+  });
+  modalMode = 'plugin-install';
+  return true;
+}
+
+/** SHA-256（十六进制）；环境不支持时返回空串，不影响流程但会显示 "?" */
+async function sha256Hex(text) {
+  try {
+    if (!(window.crypto && crypto.subtle)) return '';
+    const buf = new TextEncoder().encode(String(text));
+    const d = await crypto.subtle.digest('SHA-256', buf);
+    return Array.from(new Uint8Array(d)).map(function (b) { return ('0' + b.toString(16)).slice(-2); }).join('');
+  } catch (e) { return ''; }
+}
+
+/** 用户在确认框点了「安装」之后才真正落盘 */
+async function finishPluginInstall() {
+  const pi = pendingInstall;
+  pendingInstall = null;
+  if (!pi) return false;
+  const name = pi.name, text = pi.text;
   let ok = false;
   try { ok = Android.writePlugin(name, text); } catch (e) { ok = false; }
   if (!ok) { outAppend('⚠ ' + t('pp_install_fail') + name + '\n', 'out-err'); return false; }
@@ -4392,6 +4534,17 @@ function doDelete() {
 }
 function modalOk() {
   const name = $('modal-input').value.trim();
+  if (modalMode === 'qc-approve') {
+    ProjectConfig.markApproved();
+    hideModal();
+    runCppTermux();
+    return;
+  }
+  if (modalMode === 'plugin-install') {
+    hideModal();
+    finishPluginInstall();
+    return;
+  }
   if (modalMode === 'new') {
     const err = validName(name);
     if (err) { $('modal-error').textContent = err; return; }
@@ -4674,6 +4827,26 @@ function buildInstallCmd(kind, needSrc) {
  *  失败重试、后装 Termux 的接管全部由 startTermuxGuard() 后台守护循环负责。
  *  v4.11.1：检测顺带报告 apt 源 / pip 源是否为清华镜像，安装命令自动先切源（国内加速）。
  *  返回 { ready, absent, failed, bg }。 */
+/**
+ * v5.10.1 安全（审查 P0-2）：后台环境检测不该触发「执行 Termux 命令」的确认弹窗，
+ * 因此优先走原生固定探针（不接受参数，输出到固定文件）；老版本原生没有该接口时回退 runCapture。
+ */
+async function termuxProbeRun() {
+  if (window.Android && Android.probeTermuxEnv && Android.readEnvProbe) {
+    try {
+      if (!Android.probeTermuxEnv()) return { code: -1, output: '' };
+      const deadline = Date.now() + 20000;
+      while (Date.now() < deadline) {
+        await new Promise(function (r) { setTimeout(r, 400); });
+        const out = Android.readEnvProbe() || '';
+        if (out.indexOf('DONE') >= 0) return { code: 0, output: out };
+      }
+      return { code: -1, output: '' };
+    } catch (e) { /* 回退 */ }
+  }
+  return window.PCPluginAPI.runCapture(TERMUX_PROBE);
+}
+
 const TERMUX_PROBE =
   'echo py:$(command -v python >/dev/null 2>&1 && echo ok || echo missing);' +
   'echo cpp:$(command -v clang >/dev/null 2>&1 && echo ok || echo missing);' +
@@ -4699,7 +4872,7 @@ async function autoTermuxSetup(manual, opts) {
       ? (LANG === 'en' ? 'Checking Termux environment (python / clang)…' : '正在检测 Termux 环境（python / clang）…')
       : (LANG === 'en' ? 'Checking Termux env in background…' : '正在后台检测 Termux 环境（python / clang）…'));
     onP(10, 'splash_tx_check');
-    const r = await window.PCPluginAPI.runCapture(TERMUX_PROBE);
+    const r = await termuxProbeRun();
     const out = (r && r.output) || '';
     const pyOk = /py:ok/.test(out), cppOk = /cpp:ok/.test(out);
     const needPy = /py:missing/.test(out), needCpp = /cpp:missing/.test(out);
@@ -4783,7 +4956,7 @@ async function termuxGuardTick() {
   termuxGuard.busy = true;
   try {
     let r = null;
-    try { r = await window.PCPluginAPI.runCapture(TERMUX_PROBE); } catch (e) { r = null; }
+    try { r = await termuxProbeRun(); } catch (e) { r = null; }
     const out = (r && r.output) || '';
     // 检测失败 / Termux 忙（命令排队）：本轮放弃，下一轮自动重试
     if (!(r && r.code === 0 && /py:(ok|missing)/.test(out) && /cpp:(ok|missing)/.test(out))) return;

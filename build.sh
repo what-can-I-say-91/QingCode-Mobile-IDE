@@ -61,7 +61,9 @@ cp "$PROJ/app/src/main/java/com/qingcode/editor/MainActivity.java" "$SRC_OUT/app
 cp "$PROJ/app/src/main/AndroidManifest.xml" "$SRC_OUT/app/src/main/"
 cp -r "$PROJ/app/src/main/res/." "$SRC_OUT/app/src/main/res/"
 cp -r "$PROJ/licenses/." "$SRC_OUT/licenses/"
-cp "$PROJ/build.sh" "$PROJ/README.md" "$PROJ/README_EN.md" "$PROJ/使用说明.md" "$PROJ/使用说明_EN.md" "$PROJ/CHANGELOG.md" "$PROJ/CHANGELOG_EN.md" "$PROJ/TODO.md" "$PROJ/LICENSE" "$SRC_OUT/"
+for f in build.sh README.md README_EN.md 使用说明.md 使用说明_EN.md CHANGELOG.md CHANGELOG_EN.md TODO.md LICENSE 修复记录.md; do
+  [ -f "$PROJ/$f" ] && cp "$PROJ/$f" "$SRC_OUT/" || echo "  (跳过不存在的 $f)"
+done
 cp "$PROJ/plugins/插件接口说明.md" "$PROJ/plugins/Plugin-API-Guide_EN.md" "$PROJ/plugins/example-lang-plugin.js" "$SRC_OUT/plugins/"
 
 echo "[1/6] aapt2 编译链接资源与 assets"
@@ -105,8 +107,18 @@ fi
 
 echo "[6/6] apksigner 签名"
 if [ "$KEYSTORE" = "$PROJ/debug.keystore" ]; then
+  # 安全审查 P2-12：发布构建绝不允许落在 debug 密钥上——口令是公开的，任何人可签同名包
+  if [ "${RELEASE:-0}" = "1" ]; then
+    echo "✖ 拒绝发布：当前用的是 debug.keystore（口令公开，不能用于发布）。" >&2
+    echo "  请指定私有密钥后重试：KEYSTORE=/path/to/release.jks KEYSTORE_PASS=... ./build.sh" >&2
+    exit 1
+  fi
   echo "⚠️  正在使用 debug.keystore 签名（仅限调试，请勿发布此 APK）！"
-  echo "    发布请用: KEYSTORE=/path/to/release.jks KEYSTORE_PASS=... ./build.sh"
+  echo "    发布请用: RELEASE=1 KEYSTORE=/path/to/release.jks KEYSTORE_PASS=... ./build.sh"
+fi
+if [ "${RELEASE:-0}" = "1" ] && [ -z "${KEYSTORE_PASS:-}" ]; then
+  echo "✖ 拒绝发布：RELEASE=1 时必须提供 KEYSTORE_PASS。" >&2
+  exit 1
 fi
 "$BT/apksigner" sign --ks "$KEYSTORE" --ks-pass pass:"$KS_PASS" \
   --key-pass pass:"$KEY_PASS" \

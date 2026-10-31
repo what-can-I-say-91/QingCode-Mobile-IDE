@@ -1,4 +1,4 @@
-# QingCode Editor v5.10.0 · Source Guide
+# QingCode Editor v5.10.1 · Source Guide
 
 **[中文](README.md) · English**
 
@@ -185,8 +185,11 @@ npm pack JSCPP@2.0.9 && npx esbuild lib/commonjs.js --bundle --global-name=JSCPP
 
 - **Signing key**: the local `debug.keystore` is for debugging only and its password is public; it is listed in `.gitignore` (not shipped with the repo — a fresh clone generates its own on first build, which yields a different signature, so a clean install is required to overwrite an existing APK). **Release builds must use a private key**:
   `KEYSTORE=/path/to/release.jks KEYSTORE_PASS=... ./build.sh`; anything signed with the debug key is for personal use only.
-- **Third-party plugins**: a **newly appeared** file under `/sdcard/QingCode/plugins/` is **disabled by default** and must be confirmed in the plugin manager; **plugins run in a "🧪 sandbox" by default** (no DOM / native bridge / local storage, but **network access remains**). A fully trusted plugin can be moved to the main thread via "**Trust & run on main thread**" on its "🧪 running in sandbox" card (second confirmation, takes effect after restarting the app).
-- **Online compilers**: the default C++ engine is JSCPP (local, no upload); code is only sent to Wandbox/Judge0 when you explicitly pick "Online".
+- **Third-party plugins**: a **newly appeared** file under `/sdcard/QingCode/plugins/` is **disabled by default** and must be confirmed in the plugin manager; approval checks the content hash, and **no permissions are granted by default** — tick only what the plugin needs.
+  **Plugins run in a "🧪 sandbox" by default**: the Worker has no DOM / native bridge / storage, and its response carries `Content-Security-Policy: connect-src 'none'`, so **the sandbox has no network access either**.
+  A plugin moved to the main thread with "Trust & run on main thread" is **not permission-scoped** — it can call the native bridge directly (Termux, file I/O). The plugin manager shows a permanent notice about this; only do it for sources you fully trust.
+- **Termux channel**: to let this app submit commands, Termux must have `allow-external-apps=true`. Once enabled, **any app holding the `RUN_COMMAND` permission can execute commands in Termux**, not just this one — that is how Termux works, not something this app can narrow. This app asks for a native confirmation (showing the first 200 characters of the command) **before the first execution in each session**, and does nothing if you decline.
+- **Online compilers (off by default)**: the default C++ engine is JSCPP (local, no upload); your code is sent to Wandbox/Judge0 only when you explicitly pick "Online" — that is an outbound transfer, so avoid it for code you cannot disclose.
 - **Path validation**: the native bridge whitelists plugin/file names and canonicalises project paths, rejecting out-of-root paths; external links are handed to the system for http/https/mailto only.
 
 ## Versioning

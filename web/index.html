@@ -4,6 +4,10 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
 <meta name="theme-color" content="#007acc">
+<!-- v5.10.1 安全（审查 P0-3）：内容安全策略。
+     需要 'unsafe-eval'（插件用 new Function）与 'wasm-unsafe-eval'（Pyodide）。
+     外连只放行两个在线编译服务；如需新增外部服务，请在这里显式加域。 -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-eval' 'wasm-unsafe-eval' blob:; worker-src 'self' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; media-src 'self' blob:; connect-src 'self' blob: data: https://wandbox.org https://ce.judge0.com; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'">
 <title>轻码编辑器 QingCode</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='5' fill='%23182236'/%3E%3Ctext x='12' y='16.5' font-family='monospace' font-size='10' font-weight='bold' fill='%234fc3f7' text-anchor='middle'%3E%3C/%3E%3C/text%3E%3C/svg%3E">
 <link rel="stylesheet" href="style.css">
@@ -23,7 +27,7 @@
       <path d="M40 22 L50 32 L40 42" stroke="#fff" stroke-width="4.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
       <path d="M35 18 L29 46" stroke="#ffd166" stroke-width="4" fill="none" stroke-linecap="round"/>
     </svg>
-    <div class="splash-title"><b data-i18n="about_name">轻码编辑器 QingCode</b><span id="splash-ver">v5.10.0</span></div>
+    <div class="splash-title"><b data-i18n="about_name">轻码编辑器 QingCode</b><span id="splash-ver">v5.10.1</span></div>
     <div class="splash-group" id="splash-grp-py">
       <div class="splash-row"><span class="splash-eng" data-i18n="splash_eng_py">Python 引擎</span><span class="splash-pct" id="splash-py-pct">0%</span></div>
       <div class="splash-bar"><div id="splash-py-fill" style="width:4%"></div></div>

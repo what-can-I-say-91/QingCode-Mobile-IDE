@@ -1,4 +1,4 @@
-# 轻码编辑器 QingCode v5.10.0 · 源码说明
+# 轻码编辑器 QingCode v5.10.1 · 源码说明
 
 **中文** · [English](README_EN.md)
 
@@ -147,7 +147,7 @@ cd web && python3 -m http.server 8899
 
 # 构建 APK
 ANDROID_SDK_ROOT=/opt/android-sdk ./build.sh
-# 产物：build/QingCode.apk（versionName 5.10.0 / versionCode 59）
+# 产物：build/QingCode.apk（versionName 5.10.1 / versionCode 60）
 ```
 
 依赖：JDK 11+、Android SDK（build-tools;34.0.0、platforms;android-34）。首次构建自动生成 `debug.keystore`（口令见 build.sh）。
@@ -165,7 +165,7 @@ ANDROID_SDK_ROOT=/opt/android-sdk ./build.sh
 | 流式轮询间隔 | `MainActivity.java` 200ms handler |
 | 超时时长 | 前端 `Android.runCpp(…, 60)` 与 Termux 脚本内 `timeout 50` |
 | C++ 示例代码 | `web/app.js` 顶部 `CPP_DEFAULT_CODE`（STL 交互版）/ `CPP_JSCPP_CODE`（兜底兼容版） |
-| 应用名 / 版本号 | `AndroidManifest.xml`（当前 versionCode 59 / versionName 5.10.0）+ `web/app.js` `APP_VERSION` |
+| 应用名 / 版本号 | `AndroidManifest.xml`（当前 versionCode 60 / versionName 5.10.1）+ `web/app.js` `APP_VERSION` |
 | 内置插件 / 编辑命令 | `web/plugins/editor-plus.js`（命令 / 工具栏 / 片段 / 格式化），经 `PCPluginAPI.v3` 的 `editor` 接口注册 |
 | 插件扩展面 | `web/app.js` 的 `EditorAPI`（扩展 / 命令 / 工具栏 / 语言 / 补全 / 片段 / 格式化 / 事件）+ `PCCM.modules` |
 | 界面文案双语 | `web/i18n.js` 字典（`data-i18n` 系列属性驱动）；新增界面元素时加属性 + 双语 key |
@@ -187,9 +187,11 @@ npm pack JSCPP@2.0.9 && npx esbuild lib/commonjs.js --bundle --global-name=JSCPP
 
 - **签名密钥**：本地 `debug.keystore` 仅用于调试且口令公开，已加入 `.gitignore`（不随仓库分发；clone 后首次构建会自动生成，签名与已发布 APK 不同，覆盖安装需先卸载）。**发布 APK 必须使用私有密钥**：
   `KEYSTORE=/path/to/release.jks KEYSTORE_PASS=... ./build.sh`；用 debug 密钥签出的包只应自用。
-- **第三方插件**：`/sdcard/QingCode/plugins/` 下**新出现的插件默认禁用**，需在「插件管理」中确认后启用；
-  **插件默认在「🧪 沙箱」中运行**（Web Worker 内无法访问 DOM / 原生桥 / 存储，但**网络仍可用**）；对完全信任的插件，可在插件管理页的「🧪 沙箱运行中」卡片上点「**信任并改为主线程运行**」解除沙箱（二次确认，重启应用生效）。
-- **在线编译**：C++ 默认引擎为 JSCPP（本机执行），**不会上传代码**；只有显式选择「在线编译」才会把代码发给 Wandbox/Judge0。
+- **第三方插件**：`/sdcard/QingCode/plugins/` 下**新出现的插件默认禁用**，需在「插件管理」中确认后启用；授权时按内容指纹核对，**权限默认全不授予**，需要哪项勾哪项。
+  **插件默认在「🧪 沙箱」中运行**：Worker 内拿不到 DOM / 原生桥 / 存储，且响应头带 `Content-Security-Policy: connect-src 'none'`，**沙箱内也无法联网**。
+  「信任并改为主线程运行」的插件**不受权限约束**——它能直接调用原生桥（含 Termux 与文件读写），插件管理页对此有常驻提示；只应对完全信任的来源这样做。
+- **Termux 通道**：为让本应用能向 Termux 投递命令，Termux 侧需开启 `allow-external-apps=true`；该设置生效后，**任何持有 `RUN_COMMAND` 权限的应用都能在 Termux 里执行命令**（不只是本应用）。这是 Termux 的机制，不是本应用的授权范围。本应用在**每次会话首次执行命令前**会弹原生确认框并显示命令前 200 字，拒绝即不执行。
+- **在线编译（默认关闭）**：C++ 默认引擎为 JSCPP（本机执行），**不会上传代码**；只有显式选择「在线编译」才会把你的代码发给 Wandbox/Judge0——这属于外发，涉及不可公开的代码时不要使用。
 - **路径校验**：原生桥对插件文件名、导出文件名与项目路径做白名单 / canonical 校验，拒绝越界路径；外部链接只交给系统处理 http/https/mailto。
 
 ## 版本号规则
