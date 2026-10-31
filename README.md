@@ -45,7 +45,7 @@
 
 ## 下载 APK
 
-前往 [Releases](../../releases) 下载最新 `轻码编辑器-QingCode-v5.10.0.apk`（版本历史见下文版本表）。完整使用教程见 [使用说明.md](使用说明.md)（English: [使用说明_EN.md](使用说明_EN.md)）。
+前往 [Releases](../../releases) 下载最新 `轻码编辑器-QingCode-v5.10.1.apk`（版本历史见 [CHANGELOG.md](CHANGELOG.md)）。完整使用教程见 [使用说明.md](使用说明.md)（English: [使用说明_EN.md](使用说明_EN.md)）。
 
 ## 架构
 
@@ -91,11 +91,10 @@ QingCode-源码/
 ├── debug.keystore              # 本地调试签名（已由 .gitignore 排除，不随仓库分发；缺失时构建自动生成，口令见 build.sh）
 ├── LICENSE                     # MIT 许可证（标准英文全文）
 ├── README.md / README_EN.md    # 本文件：功能、架构、目录、机制、构建与二次开发
-├── CHANGELOG.md / CHANGELOG_EN.md # 完整版本历史（51 个版本 + 近期详情）
+├── CHANGELOG.md / CHANGELOG_EN.md # 完整版本历史与版本表（含近期详情）
 ├── 使用说明.md                  # 面向使用者的完整教程（安装/配置/常见问题）
-├── tests/e2e/                  # 前端交互回归（无头浏览器 + CDP，44 项断言）
+├── tests/e2e/                  # 前端回归（无头浏览器 + CDP 13 项 / shell 6 项，共 19 项断言）
 ├── 使用说明_EN.md               # User guide in English（与中文版内容对应）
-├── TODO.md                     # 路线图与待办（按阶段排列，含里程碑验收标准）
 ├── .gitignore                  # GitHub 上传用（Android 模板 + 构建产物排除）
 ```
 
@@ -206,4 +205,4 @@ npm pack JSCPP@2.0.9 && npx esbuild lib/commonjs.js --bundle --global-name=JSCPP
 
 > 迭代时**不更改以往文件**：历史版本 APK 保留原文件名，新版本以新文件名交付（源码目录保持最新版，历史以本表记录）。
 
-**完整版本历史（51 个版本）见 [CHANGELOG.md](CHANGELOG.md)。**
+**完整版本历史与版本表见 [CHANGELOG.md](CHANGELOG.md)。**

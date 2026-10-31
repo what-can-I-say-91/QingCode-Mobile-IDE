@@ -43,7 +43,7 @@ A lightweight Android code editor: **CodeMirror 6 + Pyodide (Python WASM) + Term
 
 ## Download APK
 
-Grab the latest `轻码编辑器-QingCode-v5.10.0.apk` from [Releases](../../releases) (see the version table below for history).The full user guide: [使用说明_EN.md](使用说明_EN.md) (English) / [使用说明.md](使用说明.md) (Chinese).
+Grab the latest `轻码编辑器-QingCode-v5.10.1.apk` from [Releases](../../releases) (see [CHANGELOG_EN.md](CHANGELOG_EN.md) for the full history). The full user guide: [使用说明_EN.md](使用说明_EN.md) (English) / [使用说明.md](使用说明.md) (Chinese).
 
 ## Architecture
 
@@ -89,11 +89,10 @@ QingCode-源码/
 ├── debug.keystore              # local debug signing key (excluded by .gitignore; auto-generated when missing, password in build.sh)
 ├── LICENSE                     # MIT license (standard English text)
 ├── README.md / README_EN.md    # This file: features, architecture, layout, mechanics, build & extending
-├── CHANGELOG.md / CHANGELOG_EN.md # Full version history (51 releases + recent details)
+├── CHANGELOG.md / CHANGELOG_EN.md # Full version history & release table (plus recent details)
 ├── 使用说明.md                  # Full user guide (install / config / FAQ, Chinese)
-├── tests/e2e/                  # Front-end interaction tests (headless browser + CDP, 44 assertions)
+├── tests/e2e/                  # Front-end regression (13 headless-browser + 6 shell checks)
 ├── 使用说明_EN.md               # User guide in English (mirrors the Chinese edition)
-├── TODO.md                     # Roadmap & backlog (staged, with milestone acceptance criteria)
 ├── .gitignore                  # for GitHub upload (Android template + build outputs)
 ```
 
@@ -145,7 +144,7 @@ cd web && python3 -m http.server 8899
 
 # Build APK
 ANDROID_SDK_ROOT=/opt/android-sdk ./build.sh
-# Output: build/QingCode.apk (versionName 5.10.0 / versionCode 59)
+# Output: build/QingCode.apk (versionName 5.10.1 / versionCode 60)
 ```
 
 Requirements: JDK 11+, Android SDK (build-tools;34.0.0, platforms;android-34). First build auto-generates `debug.keystore` (password hardcoded in build.sh).
@@ -163,7 +162,7 @@ Project paths containing **spaces or non-ASCII characters** also build directly 
 | Streaming poll interval | `MainActivity.java` 200 ms handler |
 | Timeout duration | frontend `Android.runCpp(…, 60)` and `timeout 50` inside the Termux script |
 | C++ sample code | `CPP_DEFAULT_CODE` (STL interactive) / `CPP_JSCPP_CODE` (fallback-compatible) at the top of `web/app.js` |
-| App name / version | `AndroidManifest.xml` (currently versionCode 59 / versionName 5.10.0) + `web/app.js` `APP_VERSION` |
+| App name / version | `AndroidManifest.xml` (currently versionCode 60 / versionName 5.10.1) + `web/app.js` `APP_VERSION` |
 | Built-in plugin / edit commands | `web/plugins/editor-plus.js` (commands / toolbar / snippets / formatting), registered through `PCPluginAPI.v3`'s `editor` interface |
 | Plugin extension surface | `EditorAPI` in `web/app.js` (extension / command / toolbar / language / completion / snippets / formatter / events) + `PCCM.modules` |
 | Bilingual UI strings | `web/i18n.js` dictionary (driven by `data-i18n*` attributes); add attributes + bilingual keys for new UI elements |
@@ -204,4 +203,4 @@ npm pack JSCPP@2.0.9 && npx esbuild lib/commonjs.js --bundle --global-name=JSCPP
 
 > Past releases are never modified: historical APKs keep their original filenames and new versions ship under new names (the source directory always holds the latest; history lives in this table).
 
-**The full version history (51 releases) lives in [CHANGELOG_EN.md](CHANGELOG_EN.md).**
+**The full history and release table live in [CHANGELOG_EN.md](CHANGELOG_EN.md).**
