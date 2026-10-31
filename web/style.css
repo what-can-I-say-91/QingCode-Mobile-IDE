@@ -112,15 +112,21 @@ body {
 /* 编辑器面板 */
 #editor-pane { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 #tabbar { background: var(--bg-panel); height: 38px; flex: 0 0 38px; display: flex; align-items: stretch; }
+/* v5.7.0 多标签：横向滚动容器 + 单标签 */
+#tabs { display: flex; align-items: stretch; flex: 1; min-width: 0; overflow-x: auto; overflow-y: hidden; scrollbar-width: none; }
+#tabs::-webkit-scrollbar { height: 0; }
 .tab {
   display: flex; align-items: center; gap: 6px;
-  padding: 0 10px; font-size: 13px; color: #fff;
-  background: var(--bg-editor); border-right: 1px solid #2b2b2b;
-  border-top: 1px solid var(--accent);
-  max-width: 55%;
+  padding: 0 8px 0 10px; font-size: 13px; color: var(--fg-dim);
+  background: transparent; border-right: 1px solid #2b2b2b;
+  border-top: 1px solid transparent;
+  flex: 0 0 auto; max-width: 190px;
 }
+.tab.active { background: var(--bg-editor); color: #fff; border-top-color: var(--accent); }
 .tab .fname, .tab span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tab .dot-dirty { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); flex: 0 0 auto; }
 .tab-x { border: none; background: transparent; color: var(--fg-dim); font-size: 16px; cursor: pointer; padding: 2px 4px; }
+.tab-x:hover { color: #fff; }
 #editor-container { flex: 1; min-height: 0; }
 #welcome {
   position: absolute; inset: 46px 0 0 0;
@@ -155,6 +161,50 @@ body {
   font-family: "Fira Code", Consolas, Menlo, monospace; font-size: 13px;
   padding: 10px 12px; user-select: text;
 }
+/* ---------- v5.9.0 底部三面板 / 目录树 / 键条 / 响应式 ---------- */
+#panel-log, #panel-problems { flex: 1; min-height: 0; overflow: auto; }
+#log-view {
+  font-family: "Fira Code", Consolas, Menlo, monospace; font-size: 12.5px;
+  line-height: 1.6; padding: 10px 12px; white-space: pre-wrap; word-break: break-word;
+  color: #b9c0c9; margin: 0;
+}
+.prob-row {
+  display: flex; gap: 10px; width: 100%; text-align: left; align-items: baseline;
+  background: transparent; border: none; border-bottom: 1px solid #2b2b2b;
+  padding: 9px 12px; color: #ddd; font-size: 12.5px; cursor: pointer;
+}
+.prob-row:active { background: #2d2d2d; }
+.prob-loc { color: #f08b80; font-family: monospace; flex: 0 0 auto; }
+.prob-msg { flex: 1; min-width: 0; word-break: break-word; }
+.ptab-badge { display: inline-block; margin-left: 5px; padding: 0 5px; border-radius: 8px; background: #a9483f; color: #fff; font-size: 10.5px; }
+#file-list li.dir { color: #9aa4b2; font-size: 13px; }
+#file-list li.dir:active { background: rgba(255,255,255,.06); }
+.dir-caret { width: 12px; display: inline-block; opacity: .8; }
+#keybar {
+  display: flex; gap: 6px; overflow-x: auto; padding: 6px 8px;
+  background: var(--bg-panel); border-top: 1px solid #2b2b2b; flex: 0 0 auto;
+}
+#keybar::-webkit-scrollbar { height: 0; }
+.kb-btn {
+  flex: 0 0 auto; min-width: 34px; height: 30px; padding: 0 9px;
+  border-radius: 7px; border: 1px solid #4a4a4a; background: #262626; color: #ddd;
+  font-size: 13px; cursor: pointer;
+}
+.kb-btn:active { background: #3a3a3a; }
+/* 软键盘弹出：收起终端滚动区，但保留输入行（input() 仍可用） */
+body.kb-open #output-view { display: none; }
+body.kb-open #bottom-panel { max-height: 96px; height: auto; flex-basis: auto; }
+/* 横屏 / 平板：侧栏与终端占比更合理 */
+@media (orientation: landscape) and (max-width: 900px) {
+  #sidebar { width: 190px; flex-basis: 190px; }
+  #bottom-panel { flex-basis: 150px; height: 150px; }
+}
+@media (min-width: 900px) {
+  #sidebar { width: 250px; flex-basis: 250px; }
+  #editor-pane { max-width: none; }
+  #bottom-panel { flex-basis: 240px; height: 240px; }
+}
+
 #output-view { flex: 1; min-height: 0; overflow: auto; }
 #output-log {
   font-family: "Fira Code", Consolas, Menlo, monospace; font-size: 13px;
@@ -195,6 +245,13 @@ body.term-live #term-prompt { animation: blink 1.2s infinite; }
   padding: 0 12px; font-size: 12px;
 }
 .status-sep { opacity: .55; }
+/* v5.10.0：运行会话状态 */
+#status-run { color: #9ee0a8; }
+#status-run[data-state="queued"], #status-run[data-state="preparing"] { color: #f0cd8a; }
+#status-run[data-state="building"] { color: #9db8f0; }
+#status-run[data-state="stopping"] { color: #f08b80; }
+/* v5.7.0：存储异常可见（草稿 / 元数据写不进去时不再只写终端） */
+#status-store { color: #ffb4a2; font-size: 12px; max-width: 45vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .status-flex { flex: 1; }
 
 /* ===== 对话框 ===== */
@@ -531,6 +588,19 @@ body.term-live #term-prompt { animation: blink 1.2s infinite; }
 .pp-state.off { color: #e06c60; }
 .pp-btn { padding: 5px 14px; border: 1px solid #555; border-radius: 7px; background: transparent; color: #ccc; font-size: 12px; cursor: pointer; }
 .pp-btn:active { background: #333; }
+.pp-btn-primary { border-color: #3f6fd8; color: #cfe0ff; background: rgba(63,111,216,.18); }
+.pp-btn-primary:active { background: rgba(63,111,216,.35); }
+/* v5.8.0 插件信任区块 */
+.pp-badge { display: inline-block; padding: 1px 7px; border-radius: 9px; font-size: 11px; border: 1px solid #555; color: #bbb; }
+.pp-badge.ok { border-color: #3f7d4a; color: #9ee0a8; background: rgba(63,125,74,.18); }
+.pp-badge.warn { border-color: #8a6b2f; color: #f0cd8a; background: rgba(138,107,47,.18); }
+.pp-badge.bad { border-color: #a9483f; color: #f08b80; background: rgba(169,72,63,.18); }
+.pp-trust { margin-top: 9px; padding: 8px 9px; border: 1px solid #3a3a3a; border-radius: 8px; background: rgba(255,255,255,.02); }
+.pp-trust-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.pp-trust-hash { font-size: 11px; color: #7f8794; font-family: monospace; }
+.pp-perm-pick { display: flex; flex-wrap: wrap; gap: 6px 12px; margin-top: 8px; }
+.pp-perm-item { display: flex; align-items: center; gap: 5px; font-size: 12px; color: #bbb; }
+.pp-perm-item input { accent-color: #3f6fd8; }
 .pp-table { border-collapse: collapse; width: 100%; }
 .pp-table th, .pp-table td { text-align: left; padding: 8px 6px; border-bottom: 1px solid #3a3a3a; font-size: 12.5px; color: #ccc; word-break: break-all; }
 .pp-table th { color: #888; font-weight: normal; }
@@ -559,6 +629,7 @@ body.term-live #term-prompt { animation: blink 1.2s infinite; }
   font-size: 15px; line-height: 1; cursor: pointer;
 }
 .etb-btn:active { background: rgba(255,255,255,.14); color: #fff; }
+.etb-btn.on { background: rgba(79,124,255,.30); color: #ffffff; }
 
 /* ===== v5.0 命令面板 ===== */
 #cmd-palette {
@@ -683,6 +754,13 @@ body.term-live #term-prompt { animation: blink 1.2s infinite; }
 .cp2-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cp2-hint { flex: 0 0 auto; font-size: 11px; color: #6f7681; }
 .cp2-row.disabled { opacity: .55; }
+/* v5.9.0：控制面板行内控件 */
+.cp-ico { flex: 0 0 auto; margin-right: 8px; font-size: 13px; opacity: .85; }
+.cp2-step { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; }
+.cp2-stepbtn { width: 26px; height: 26px; border: 1px solid #4a4a4a; border-radius: 6px; background: #2a2a2a; color: #ddd; font-size: 15px; line-height: 1; cursor: pointer; }
+.cp2-stepbtn:active { background: #3a3a3a; }
+.cp2-stepval { min-width: 34px; text-align: center; font-size: 12px; color: #cfe0ff; font-family: monospace; }
+.cp2-sel { flex: 0 0 auto; max-width: 46%; background: #262626; color: #ddd; border: 1px solid #4a4a4a; border-radius: 6px; padding: 4px 6px; font-size: 12px; }
 
 /* ===== v5.2.2 命令面板 VS Code 化 ===== */
 #cp-titlemode {

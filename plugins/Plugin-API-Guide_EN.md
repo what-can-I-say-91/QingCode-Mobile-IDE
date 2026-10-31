@@ -1,6 +1,6 @@
-# QingCode Plugin API Guide (PCPluginAPI v2)
+# QingCode Plugin API Guide (PCPluginAPI v3)
 
-> The plugin interface is reserved since v4.4 and upgraded to v2 in v4.6; **since v5.4.2 plugins run in a Web Worker sandbox by default (see section 6)**. Original text: v2 upgrade (adds plugin-manager custom tabs via `page()`, standard meta fields and plugin enable/disable; **v1 plugins stay compatible unchanged**). The host only provides loading and low-level channels — **plugins are developed by you**.
+> The plugin interface is reserved since v4.4, upgraded to v2 in v4.6, and **to v3 in v5.0 (adds the `editor` interface)**; **since v5.4.2 plugins run in a Web Worker sandbox by default (see section 6)**. v1/v2 plugins stay compatible unchanged. The host only provides loading and low-level channels — **plugins are developed by you**.
 
 **[中文](插件接口说明.md) · English**
 
@@ -85,7 +85,34 @@ Prerequisites: Termux installed and initialized via "Settings → Engines & Term
 | `copy(text)` | Copy to clipboard |
 | `storage(id)` | Namespaced key-value storage: `get(key, dft)` / `set(key, val)` / `del(key)` (localStorage with an automatic `pc_plugin_<id>_` prefix) |
 | `page(tabId, def)` | **New in v2**: register a custom tab in the plugin manager, `def = { title, render(container, api) }`; `render` is lazily called each time the tab is activated, `container` is the content container you can fill freely; returns success (built-in tab ids `loaded`/`langs`/`settings` cannot be overridden) |
-| `apiVersion` | Interface version, currently `2` (bumped on breaking changes) |
+| `apiVersion` | Interface version, currently `3` (bumped on breaking changes) |
+
+### 4.1 Editor interface `api.editor` (since v5.0 / v3)
+
+Since v5.0 the editor kernel keeps only the essentials (document / line numbers / undo / highlighting / error marks); every other editing capability is assembled by plugins through `api.editor`. **In the sandbox only the subset marked "sandbox" is available** (see section 6).
+
+| Group | API | Description |
+|---|---|---|
+| View | `view` | CM6 `EditorView` instance (not in sandbox) |
+| | `modules` | `PCCM.modules`, 73 CM6 exports (not in sandbox) |
+| | `focus()` / `insertText(text)` | Focus editor / insert text at selection |
+| Extensions | `addExtension(ext)` / `removeExtension(ext)` / `setExtensions(list)` | Attach CM6 extensions; tracked by owner, auto-removed when the plugin is disabled |
+| Commands | `registerCommand(id, { label, labelKey, group, run })` | Register a command; `run` returning `false` means "not handled" |
+| | `unregisterCommand(id)` / `listCommands()` / `runCommand(id)` | Remove / list / run |
+| Toolbar | `addToolbarButton({ id, icon, label, order, active, run })` | Add a button; `active` (function or boolean) controls the highlighted state |
+| | `removeToolbarButton(id)` / `refreshToolbar()` | Remove / re-render (**v5.4.3**: call after state changes; never cache the returned DOM) |
+| Language | `registerLanguage(names, factory)` / `setLanguage(name)` / `currentLanguage()` | Register / force / query language |
+| Completion | `registerCompletion(lang, src)` / `getCompletion(lang)` / `completionData` | Completion source / read / built-in tables (`keywords` `members` `includes`) |
+| Snippets | `registerSnippets(lang, list)` / `setSnippets(lang, list)` / `getSnippets(lang)` | Append / replace / read |
+| Formatting | `registerFormatter(lang, fn)` / `getFormatter(lang)` | Register / read |
+| Error marks | `setErrors(list)` / `clearErrors()` | **v5.4.3**: sync with the kernel's `currentErrs` (`[{line,col,message}]`); editing the line clears the mark |
+| Files | `files()` / `activeFileName()` / `openFile(name)` / `setFileContent(name, s)` / `saveAll()` / `gotoLine(line, col)` | File & content services |
+| Events | `on(evt, fn)` | `docChange` / `selection` / `fileOpen`; auto-cleaned by owner on disable |
+| Eval | `pyEval(code)` | Evaluate in the Python runtime, returns a string (`null` on failure) |
+| Palette | `openCommandPalette(filter, { noInput, title })` | Open the command palette / action menu |
+
+> **Sandbox subset**: `getText` / `setText` / `runCommand` / `currentLanguage` / `activeFileName` / `registerCommand` / `on`.
+> Everything else (`view` / `modules` / extensions / toolbar / language / completion / snippets / formatting / `pyEval` / writing files) requires turning the sandbox off.
 
 ## 5. Plugin manager extensions (v4.6)
 
@@ -130,7 +157,9 @@ PCPluginAPI.register({
 
 ### What a sandboxed plugin can do
 
-A sandboxed plugin **cannot reach** `window`, `document`, the `Android` bridge or `localStorage`; it talks to the host only through a restricted, asynchronous RPC API:
+A sandboxed plugin **cannot reach** `window`, `document`, the `Android` bridge or `localStorage`; it talks to the host only through a restricted, asynchronous RPC API.
+
+The Worker still has normal **network access** (`fetch` / `XMLHttpRequest` / `WebSocket` / `importScripts`) and IndexedDB — the sandbox isolates DOM and native capabilities, not the network. Since v5.4.3 the plugin scope additionally shadows `self` / `window` / `document` / `localStorage` as defence in depth; treat that as a speed bump, not a hard boundary (a plugin can still walk the prototype chain).
 
 | Restricted API | Description |
 |---|---|
@@ -139,6 +168,7 @@ A sandboxed plugin **cannot reach** `window`, `document`, the `Android` bridge o
 | `api.editor.runCommand(id)` | Run a host command (e.g. `edit.undo`, `format.light`) |
 | `api.editor.currentLanguage()` / `api.editor.activeFileName()` | Current language / file name |
 | `api.editor.registerCommand(id, { label, run })` | Register a command (proxied on the main thread; the callback runs back in the Worker) |
+| `api.editor.on(evt, fn)` | Subscribe to `docChange` / `selection` / `fileOpen` (v5.4.3) |
 | `api.t(key)` | Look up UI strings |
 | `api.log(msg)` / `api.out(msg)` | Print to the terminal |
 
@@ -146,7 +176,12 @@ A sandboxed plugin **cannot reach** `window`, `document`, the `Android` bridge o
 
 ### When to turn the sandbox off
 
-A plugin that needs the full `PCPluginAPI` (the API reference in section 4 — Termux, CM6 extensions, UI registration) must have its sandbox **turned off** from the plugin page (a second confirmation appears; that state means the user explicitly trusts it).
+A plugin that needs the full `PCPluginAPI` (the API reference in section 4 — Termux, CM6 extensions, UI registration) must have its sandbox **turned off**.
+
+How: open **Plugin manager**. The plugin shows up as a **"🧪 running in sandbox"** card; tap **"Trust & run on main thread"** on that card and confirm (the confirmation is the explicit trust step). The switch takes effect **after restarting the app** — plugin code is loaded at startup.
+
+> v5.4.3 fixed this entry point. Before it, sandboxed plugins did not appear among loaded plugins, so the sandbox toggle was unreachable and plugins needing the full API could never be enabled.
+
 **The Lua language-plugin example in section 3 relies on `runCapture`, so it must run on the main thread.**
 
 ### Writing compatible code
@@ -169,7 +204,52 @@ PCPluginAPI.register({
 
 > Branch on `api.sandboxed === true` so a single plugin source degrades gracefully in both environments.
 
-## 7. Notes
+## 7. Plugin trust & permissions (v5.8.0)
+
+Since v5.8.0 a third-party plugin is no longer trusted just for sitting in the plugin directory: it runs on a **content hash + explicit approval**.
+
+### 7.1 What an approval record holds
+
+```js
+{
+  sha256: '…',            // content hash at approval time (SHA-256)
+  size: 1234,
+  version: 3,             // approval count
+  approvedAt: 1730000000000,
+  permissions: { storage: false, network: true, workspace: true, termux: false },
+  mode: 'sandbox'         // sandbox | inline (main thread)
+}
+```
+
+### 7.2 The four states
+
+| State | Meaning | Runs? |
+|---|---|---|
+| Approved | Shared file matches the approved hash | Yes (prefers the private copy) |
+| Shared file updated | Shared file changed, private copy is still the approved one | Yes — runs the **approved copy**, and flags an update awaiting approval |
+| Not approved | Never approved | **No** |
+| Approval void | Content changed and no valid approved copy exists | **No**; must be approved again |
+
+> Approving copies the source into app-private storage (`getFilesDir()/plugin_cache/`), and that copy is what runs. The shared directory (`/sdcard/QingCode/plugins/`) is only an **import entry point** — another app editing files there cannot change the code that is running.
+
+### 7.3 Permission scopes
+
+| Scope | Unlocks |
+|---|---|
+| `storage` | `writeSwapFile` / `readSwapFile` / `deleteSwapFile` (swap-directory I/O) |
+| `network` | `fetch` / `XHR` / `WebSocket` inside the sandbox; online compile |
+| `workspace` | `editor.files()` / `ensureAll()` / `setFileContent()` / `saveAll()` / `openFile()` |
+| `termux` | `execTermux()` / `runCapture()` (shell execution) |
+
+Ungranted scopes are **blocked at the call site**: the call returns a failure value and prints one terminal warning — nothing is silently allowed. Main-thread plugins are trimmed by declaration; sandboxed plugins cannot reach those channels anyway, so the list is informational for them.
+
+Approve, revoke and switch run mode on the plugin card under **Plugin manager → Loaded**; changes take effect after a **restart** (plugins load at startup).
+
+### 7.4 Treat it as a restricted runtime, not a security boundary
+
+A Web Worker isolates DOM, the native bridge and local storage — the network is still reachable and the masking can be bypassed via prototypes. **Hash-based approval fixes "the file was swapped behind your back", not "the plugin code is malicious".** The real prerequisite is still: install only plugins from sources you trust, and tick only the scopes they actually need.
+
+## 8. Notes
 
 - Plugins run inside the frontend WebView; their capability boundary is exactly the `PCPluginAPI` channels — do not reach into host internals (they may change without notice);
 - `onRun` is currently a synchronous call: use an `async` function and `await` inside for long tasks; the Stop button does not yet take over plugin runs (reserved for API v1);

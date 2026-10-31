@@ -6,6 +6,186 @@ Full version history of the QingCode editor. The versioning scheme (x/y/z) lives
 
 ## Recent releases (v5.x)
 
+### v5.10.0 Updates (y · SAF workspace + build/execution split)
+
+The last two foundational stages of the roadmap land: the workspace moves to a system folder grant, and building is fully separated from running.
+
+**SAF workspace (plan 3.1)**
+
+- The "Open workspace" menu item uses `ACTION_OPEN_DOCUMENT_TREE` and calls `takePersistableUriPermission` immediately, so the workspace survives a restart;
+- The workspace joins the existing code as a `saf:<id>` token (read / write / disk signature / restore all share one path); natively, `DocumentsContract` resolves each path segment **by display name, never by concatenating document ids** — `..`, absolute paths and forged document ids cannot escape the granted tree;
+- Every write is bound to the granted tree: `withinSharedStorage` only proves "somewhere in shared storage", SAF proves "belongs to this workspace";
+- Writes go through "temp file → delete old → rename", and any failure restores the original from a backup and reports a readable reason back to the UI (the terminal no longer just says "save failed");
+- Normal editing no longer needs "All files access"; the Termux compile channel keeps its own swap directory and permission, and the two are independent.
+
+**Build / execution split (plan 3.2)**
+
+- **Multi-source compilation**: `entry + sources` go to the compiler together (previously only the current file was compiled, so multi-file projects never built);
+- **The cache key covers every input**: each source file (with path), every header (with path), flags / include / standard, compiler path and version; the cache now has **entry-count and size caps with LRU eviction** (it used to grow forever);
+- **A staging area that preserves the directory structure**, shared by all engines (headers/modules used to be flattened into the session root, so `#include "sub/x.h"` and in-package imports failed);
+- **`.qingcode.json` project config**: `entry` / `sources` / `includeDirs` / `compiler` / `standard` / `flags` / `args` / `env` / `cwd` / `timeoutSec` / `cacheMaxMB` / `cacheMaxEntries`, validated field by field; invalid entries are ignored with an explanation instead of breaking the whole run;
+- **One session state machine** `queued → preparing → building → running ⇄ waitingInput → stopping → terminal`, surfaced in the status bar;
+- **Every output / exit / error event carries a `sessionId`**, and the front end drops events from stale sessions (late output from a previous run no longer bleeds into the current one);
+- **Compile and run are separated**: the binary stays in the cache, and "Rerun (skip compile)" in the command palette runs the previous build;
+- **`stderr` is read incrementally by offset** (it used to be re-read in full every 200 ms — O(n²) with heavy output);
+- **Terminal output is coalesced**: many appends in one task become a single DOM write, adjacent same-class runs merge into one text node, with both a node cap and a byte cap (a multi-MB single push is truncated rather than inserted).
+
+**Real bugs caught by the new tests**
+
+- The generated Termux script never assigned `BIN` (only `PCBIN`) — the build succeeded and then nothing ran;
+- The byte cap did not apply to a single oversized node; 4 MB went into one `<span>`;
+- The checked `JSONException` from `JSONObject.put` in the SAF callback was unhandled (javac rejected it — now blocked at build time).
+
+**Engineering**
+
+- New `tests/e2e/e2e-run.mjs` (19 checks: config parsing/validation, staging layout, session state machine and stale drops, output caps, rerun, SAF token read/write);
+- New `tests/e2e/termux-script.sh` (15 checks: multi-source build, cache key reacting to headers/flags, LRU by count and size, rerun without recompiling, exit 127 when the artifact was pruned) — it runs the same shell logic locally with a fake compiler;
+- Front-end regression total: **79 checks** (18 + 9 + 9 + 8 + 16 + 19), plus 15 shell-logic checks.
+
+**Still not done**
+
+- clangd integration: needs the clangd binary and `compile_commands.json`; no environment here to verify it.
+
+- versionCode: 5.10.0 (59).
+
+
+### v5.9.1 Updates (z · full debug pass)
+
+A systematic bug hunt (static cross-checks + boundary cases) that fixed 5 real defects:
+
+- **Key bar up/down moved to the wrong place**: it used the line-length delta, so ↑ from a long line jumped lines and from a short line went out of range; it now moves by column and clamps to the target line's end;
+- **The directory tree hid the active file**: when the open file lived in a collapsed folder, the tree showed neither the row nor a highlight; ancestors now expand automatically;
+- **Plugins with an uppercase `.JS` extension were listed but unreadable**: native `listPlugins`/`pluginInfo` matched `.js` case-insensitively while `readPlugin` required lowercase — both now use the same naming rule;
+- **A failed sandbox Worker still showed as "running"**: when `spawn()` returned null the old code still recorded the plugin in `PluginHost.sandboxed`, producing a fake state in the manager; it is now marked failed with a message;
+- **The empty Problems panel did not re-render on language switch**: `applyLang` only redrew the tab bar.
+
+**Engineering**
+
+- New boundary / failure-path suite `tests/e2e/e2e-debug.mjs` (16 checks): missing file, empty file list, Chinese and spaced file names, tree auto-expand, key bar column math, delete/rename cleanup, **storage quota failure**, **corrupted localStorage**, re-approval after tampering, approval refusal without a hash, LS synchronous results not flagged stale, log cap, empty state, pending-approval card rendering;
+- Full regression: **60 checks** (tabs 18 / plugins 9 / ui 9 / ls 8 / debug 16) all passing.
+
+- versionCode: 5.9.1 (58).
+
+
+### v5.9.0 Updates (y · mobile workbench / LanguageService / gap items)
+
+Closes out stages 4-5 of the roadmap plus the "missing features" list. All front-end work — the run engines are untouched.
+
+**Mobile workbench (4.1)**
+
+- The bottom area splits into **Terminal / Output / Problems**: program output stays in the terminal, status messages go to Output (last 500 kept), diagnostics go to Problems with click-to-jump and a count badge on the tab;
+- The file list becomes a **directory tree** when the project has subdirectories, expanded on demand (collapsed subtrees build no DOM) with the open state persisted;
+- **Configurable key bar** (Esc / Tab / arrows / common symbols), off by default, enabled under "Plugin manager → Settings";
+- **Soft-keyboard aware layout**: `visualViewport` measures the keyboard, collapsing the terminal scroll area while keeping the input row;
+- Landscape and tablet (≥900px) layouts, plus external-keyboard shortcuts (Ctrl+P / Ctrl+Shift+P / Ctrl+F / Ctrl+B / Ctrl+` / Ctrl+/ / F5).
+
+**LanguageService (4.2)**
+
+- One async protocol — `diagnostics` / `completion` / `definition` / `references` / `documentSymbol` — with `documentUri` + `documentVersion` + `requestId` on every request;
+- Editing or switching files bumps the document version; if the version moved (or the request was cancelled) the result is flagged `stale` and callers drop it;
+- Analysis defaults to a **separate Pyodide instance** (its own Worker) so it cannot pollute user code; can be disabled in settings, with automatic fallback;
+- The built-in Code Intelligence plugin registers the Python provider; **C++ keeps the existing heuristic as a fallback backend**; clangd is not wired up (needs `compile_commands.json` and a persistent channel).
+
+**Gap items (9)**
+
+- The 4 control-panel placeholders now have real controls (font stepper / indent stepper / C++ engine / Python engine);
+- Plugins can be **installed online** from a direct HTTPS link (single `.js`, ≤512KB) and still go through approval;
+- Registering languages/menus/toolbars/completions inside the sandbox now **fails loudly** with "trust & run on main thread";
+- Sandbox command results and exceptions are **returned to the host** (`call-result`), reported in the terminal, and forwarded to plugins via a `commandResult` event;
+- Sandboxed plugins get an **`onUnload`** lifecycle (notified before terminate);
+- Python can be **interrupted in main-thread fallback mode** (`setInterruptBuffer` → KeyboardInterrupt);
+- Recently used commands are truly pinned to the top of the palette;
+- The title-bar box now runs the **unified search** (files / symbols / full text);
+- Snippets support **in-place editing** (including moving to another language).
+
+**Engineering**
+
+- The front-end interaction suite (headless browser + CDP) is now part of the repo: `tests/e2e/`, 4 files with 44 assertions, one command: `./tests/e2e/run.sh`.
+
+- versionCode: 5.9.0 (57).
+
+
+### v5.8.0 Updates (y · plugin trust model)
+
+Addresses 4.5 of the mobile-IDE plan: a plugin is no longer trusted just for being in the directory.
+
+- **Approval records carry a content hash**: `{ sha256, size, version, approvedAt, permissions, mode }`, with the SHA-256 computed natively (`pluginInfo()`);
+- **Any content change voids the approval**: if a shared plugin file is edited, the old approval no longer covers it — with no valid copy the plugin is **refused**, and it has to be approved again;
+- **Shared folder is only an import entry**: approving copies the source into app-private storage (`getFilesDir()/plugin_cache/`) and that copy is executed; editing the shared file merely flags "an update awaits approval" instead of swapping the running code;
+- **Per-scope permissions**: `storage` / `network` / `workspace` / `termux` are separate; main-thread plugins are trimmed by declaration (ungranted calls fail and warn once in the terminal), while sandboxed plugins cannot reach those channels anyway;
+- **Plugin manager**: cards show approval state, the first 8 hash chars, granted scopes and the approval version; unapproved plugins only offer "tick scopes → approve & enable", and deleting a plugin revokes its approval and removes the private copy;
+- **Legacy migration**: previously enabled plugins are upgraded to approval records (with their current hash); newly appeared plugins still need manual approval;
+- Docs updated to state that a Web Worker is a **restricted runtime, not a security boundary for untrusted code** (`plugins/Plugin-API-Guide_EN.md` section 7).
+
+- versionCode: 5.8.0 (56).
+
+
+### v5.7.0 Updates (y · stage 1 complete: tabs and document state)
+
+Stage 1 (Workspace / Document) is now complete: the document layer moves from a single file to real tabs with per-file state.
+
+- **Multiple tabs**: one tab per opened file (max 12; least-recently-used inactive tabs are evicted), horizontally scrollable, with an unsaved dot; **closing a tab only closes the view, never deletes the file**, and at least one tab always stays open;
+- **Per-file `EditorState`**: selection, scroll position, **undo/redo history** and folding are kept per file and restored when you switch back — undo in file A can never touch file B;
+- **Workspace metadata moved to IndexedDB** (`pc_ws/meta`): `localStorage` now only holds UI settings; metadata is flushed on exit / background; the legacy `pc_workspace` key is migrated and removed automatically;
+- **Disk signature checked on restore**: files changed externally while the workspace was closed keep their draft, but the stored signature is rolled back to the version the draft was based on, so saving refuses to overwrite; drafts whose file was deleted on disk are reported and cleaned up;
+- **Storage failures are visible**: failed draft / metadata writes (quota exceeded, storage disabled) show a persistent status-bar warning and print once in the terminal instead of only logging to console;
+- Also fixed: default-space sample files had no `_saved` baseline, so the "unsaved" predicate was always false; renaming a file now migrates its tab and view state too.
+
+- versionCode: 5.7.0 (55).
+
+
+### v5.6.0 Updates (y · on-demand loading for large projects)
+
+First item that closes out stage 1: opening a project no longer reads every file's content into memory.
+
+- **On-demand loading**: new native methods `readProjectMeta` (enumerates `rel` / `size` / `mtime` only) and `readProjectFile` (single-file synchronous read); projects with **> 40 files or > 1.5 MB** switch to lazy mode automatically — a file's content is read when it is opened;
+- **Small projects behave as before**: within the thresholds a single full read is still used, so plugins and existing flows stay compatible;
+- **Read before run**: injecting Python modules / C++ headers now loads exactly the files needed (a run needs all of them anyway);
+- **Global search & symbols refill first**: new `editor.ensureAll()` for plugins that need the whole project (the built-in navigator uses it);
+- **"Not loaded" is never treated as "empty file"**: lazy files carry `content === null`, and save / export / inject all skip them explicitly; in workspace mode `localStorage` no longer stores file content;
+- The 5.5.0 workspace restore, drafts and save-conflict detection are unchanged.
+
+- versionCode: 5.6.0 (54).
+
+
+### v5.5.0 Updates (y · workspace & document state recoverable)
+
+Part of stage 1 of the mobile-IDE refactor — reliability of workspace / document state first:
+
+- **Workspace auto-restore**: root path, active file and file list are persisted (`pc_workspace`); on restart the last project reopens automatically, and an inaccessible folder is reported and its stale metadata cleaned up;
+- **Unsaved edits are no longer lost**: edits are written to an **IndexedDB draft store** (`pc_ws/drafts`) with a 1.2 s debounce and deleted after a successful save; after a process kill or restart the draft is merged back over the on-disk content and still marked as unsaved;
+- **Saving never silently overwrites external changes**: each file carries a disk signature (`size:mtime`) that is compared before writing; files modified by another app are **skipped** for that round and listed in the terminal (new native bridges `statFile` / `projectExists`);
+- **Closing a workspace clears its drafts**, so restored content cannot come back later.
+
+> This release covers only the workspace/document-state part of stage 1: **on-demand loading, multi-tab, per-file `EditorState` and the SAF file model are not implemented yet.**
+
+- versionCode: 5.5.0 (53).
+
+
+### v5.4.3 Updates (z · code-review fixes)
+
+Full-codebase review (30 findings), all fixed:
+
+- **Sandbox can now be lifted**: sandboxed plugins get a "Trust & run on main thread" action — previously they never entered the loaded list, so the sandbox toggle was unreachable and plugins needing the full API were permanently locked out;
+- **Python code intelligence works again**: the analysis script now *returns* JSON instead of `print`-ing it (`runPythonAsync` returns `None` for `print`, so symbols / references / problems / go-to-definition / call hierarchy all reported "analysis failed" and dumped JSON into the terminal);
+- **Sub-directory projects run**: parent directories are created before writing into the run session dir (`src/main.py` previously always failed with "cannot write swap directory");
+- **`auto` engine no longer uploads code silently**: without Termux it falls back to built-in JSCPP; online compilers must be chosen explicitly;
+- **Cancel on `input()` means EOF**: native dialog returns `null`, surfaced as Python `EOFError` (it used to be an empty line);
+- **CJK streaming output no longer garbles**: output offsets advance by complete UTF-8 character boundaries instead of re-encoded byte length;
+- **32 MB runaway-output guard runs earlier**: size is checked before reading, not after loading the giant file into memory;
+- **WASM compile cache works in Worker mode**: the hook is installed before `loadPyodide()` (it used to be installed after compilation had already happened);
+- **Switching files switches the highlight language**: the language package is reconfigured even when content is identical;
+- **Multi-cursor toolbar highlight restored**: declarative `active()` + `refreshToolbar()` instead of a stale DOM reference;
+- **Editor marks stay in sync**: new `editor.setErrors` / `editor.clearErrors` bring back "editing the line clears the mark";
+- **Global search matches case-insensitively for both preview and replace**, with a real replacement count;
+- **Unicode file names can be exported** (`/ \ ..` still blocked), and failed exports no longer report success;
+- **"Go to parent" restored** in the folder picker (storage-root comparison instead of hard-coded `/sdcard`);
+- **Python Worker timeout/crash guards**: init timeout terminates and falls back; a run with no response is force-finished after 10 minutes;
+- Also: plugin event listeners are cleaned up by owner, plugin menu items are no longer duplicated, `runCapture` cleans temp files on timeout, terminal DOM nodes capped at 4000, sandbox event forwarding, `build.sh` pre-checks SDK tools, README version sync.
+
+- versionCode: 5.4.3 (52).
+
+
 ### v5.4.2 Updates (z · sandbox by default)
 
 - Third-party plugins now run in a Web Worker sandbox **by default** (previously main thread with a manual opt-in);
@@ -131,6 +311,14 @@ The editor is now split into a **minimal core + plugins**, plus a batch of pract
 | v4.5 | y (Python compile cache + bilingual docs) | **Python runtime compile cache**: before `ensurePyodide` loads, a hook wraps `WebAssembly.instantiateStreaming` — the compiled `WebAssembly.Module` of `pyodide.asm.wasm` (~10 MB) is persisted to IndexedDB (keyed by URL + byte size, so upgrades auto-invalidate and rebuild), and **the next cold start calls `new WebAssembly.Instance(cachedModule)` directly, skipping the entire compilation phase** (the bulk of the load time); the status line shows the load duration and prints "compile cache hit" when the cache matches; note: V8 compile artifacts are engine-internal objects that can only live in app-internal persistent storage (IndexedDB) — the swap directory cannot hold them — so the effect is exactly "compiled state quickly reused across cold starts" (HTTP-layer resource cache headers — wasm 7 days / js 1 day — already exist on the native side); **all documentation is now bilingual**: new `使用说明_EN.md` (full English user guide) and `plugins/Plugin-API-Guide_EN.md` (English plugin API guide), with language-switch lines added at the top of the Chinese editions — README / user guide / plugin docs all ship in both languages; versionCode 25 |
 | v4.6 | y (splash screen + plugin manager + plugin API v2) | **Splash screen (main UI locked until Python is ready)**: new full-screen startup page (logo + version + progress bar + stage status text) that kicks off the Python runtime load immediately and shows live progress (load pyodide.mjs → smooth interpreter-init climb 8%→85% → ready 100%); **the main UI unlocks only when the runtime is ready**; replaces the v4.4 "defer preload by 3.5s" approach — the splash itself is the waiting UI, so compile-time CPU saturation no longer feels like a freeze, and Python runs instantly once inside; **failure/timeout fallback**: on load failure or a 90s timeout a "Skip loading and enter" button appears (the app is never locked out; loading continues in the background and Python stays available); `ensurePyodide` now accepts an `onProgress` callback; with the v4.5 compile cache, second cold starts race through the splash; **plugin manager page (Menu → 🧩 Plugin manager)**: full-screen page with **top tabs** — built-in "Loaded" (plugin cards: name/version/author/description/id/source file + enabled state with enable/disable buttons), "Languages" (table of plugin-registered languages) and "Settings" (plugin API & folder info + **plugin system master switch** + reserved-capabilities note); **reserved API (PCPluginAPI upgraded to v2)**: `page(tabId, { title, render(container, api) })` registers a custom manager tab (lazily rendered; built-in tab ids cannot be overridden); meta gains standard `author`/`description`/`homepage`/`onUnload` fields (shown in the manager); **plugin enable/disable**: `localStorage('pc_plugins_disabled')` disables by filename plus a `pc_plugins_enabled` master switch — `loadPlugins` skips disabled plugins (takes effect on restart), toggles from the manager show a toast; versionCode 26 |
 | v4.7 | y (Termux-native Python engine) | **Termux Python becomes the third Python engine** (the "Python engine" menu gains "Termux Python (native · pip packages)" alongside built-in Pyodide / online): reuses the entire C++ Termux infrastructure (RUN_COMMAND + wakeTermux background wake + mkfifo interactive pipe + 200ms incremental polling + 32MB runaway-output guard + timeout kill); new native bridge `runPyTermux` — **no build phase**, `python -X utf8 -u` directly interprets the swap-dir .py (`-u` for realtime streaming output, `-X utf8` to avoid encoding issues); **setup fully separated from C++**: when python is missing the run script auto-runs `pkg install -y python` (one-time network), independent of the C++ clang install and the init wizard; `input()` interaction matches C++ (terminal input row writes the FIFO line by line); in workspace mode all .py files are flattened into the swap dir so same-directory modules import directly (complex package layouts: use site-packages or the Termux terminal); Stop terminates instantly via the same path as C++; versionCode 27 |
+| **v5.10.0** | y (SAF workspace + build split) | **SAF workspace** (system folder grant, token-based integration, writes bound to the granted tree, temp-file + backup replace) · **multi-source build** with a full cache key + LRU · structure-preserving staging · `.qingcode.json` · session state machine with `sessionId` stale drops · compile/run separation · incremental `stderr` · coalesced output with dual caps |
+| **v5.9.1** | z (full debug) | 5 fixes: key-bar up/down column math, active file hidden in the tree, uppercase `.JS` listed but unreadable, failed sandbox still shown as running, empty Problems panel not re-rendered on language switch; plus a 16-check boundary suite |
+| **v5.9.0** | y (workbench / language service / gap items) | Terminal-Output-Problems panels, directory tree, key bar, keyboard & tablet layout; **LanguageService protocol** (version + cancel + stale drop, separate analysis instance); control panel & snippet editing, online plugin install, sandbox `onUnload`/`call-result`/loud errors, interruptible main-thread Python, unified search; test suite in repo |
+| **v5.8.0** | y (plugin trust) | **Approval by content hash + scopes**: unapproved plugins never run, editing the file voids the approval, and the approved copy in app-private storage is what executes (the shared folder is only an import entry); scopes: `storage`/`network`/`workspace`/`termux` |
+| **v5.7.0** | y (tabs & document state) | Stage 1 closes out: **multiple tabs** (one per file, max 12, closing a tab never deletes the file) + **per-file `EditorState`** (selection / scroll / undo history isolated per file); workspace metadata moved to **IndexedDB**; disk signature verified on restore (externally changed files are never overwritten); storage failures surface in the status bar |
+| **v5.6.0** | y (on-demand loading) | Large projects no longer read every file up front: new native `readProjectMeta` (returns `rel`/`size`/`mtime` only) and `readProjectFile` (single file); enabled automatically above 40 files or 1.5 MB, small projects unchanged; modules/headers are read on demand before a run; `editor.ensureAll()` for global search; lazy files carry `content === null` and are explicitly skipped by save/export/inject, and workspace mode stops storing content in localStorage. versionCode 54 |
+| **v5.5.0** | y (workspace restore) | Part of mobile-IDE stage 1: **workspace auto-restore** (root / active file / file list persisted), **unsaved edits kept in an IndexedDB draft store and merged back after restart**, **disk signature (`size:mtime`) checked before saving so external changes are never silently overwritten** (new native `statFile` / `projectExists`), drafts cleared when a workspace is closed. On-demand loading / multi-tab / per-file EditorState / SAF are left for later. versionCode 53 |
+| **v5.4.3** | z (code-review fixes) | 30 findings fixed: **sandbox can be lifted** (sandboxed plugins had no way back to the main thread), **Python code intelligence restored** (script returns JSON instead of `print`-ing it), **sub-directory projects run**, **`auto` no longer uploads code silently**, **cancel on `input()` = EOF**, **CJK output advances on UTF-8 character boundaries**, **32 MB guard runs before reading**, **WASM cache actually works / Worker timeout terminates**, **toolbar active state**, **editor marks stay in sync**, **Unicode file names exportable**, **"go to parent" restored**, build compatibility (aapt2 invoked with relative paths, so paths with spaces/Chinese work). versionCode 52 |
 | **v5.4.2** | z (sandbox by default) | **Third-party plugins now run in a Web Worker sandbox by default** (previously the main thread): inside it there is no `window` / `document` / `Android` bridge / `localStorage`, only a restricted RPC for reading/writing editor text and running commands; storage switched to `pc_plugins_inline` (a **main-thread whitelist**, empty by default); a trusted plugin can have its sandbox turned off from the plugin page, which requires a **second confirmation** stating that bridge access is granted. Together with v5.4.1's "new plugins disabled by default", the defaults are now "confirm first, sandbox second". versionCode 51 |
 | **v5.4.1** | z (security review fixes) | Fixes from the QingCode Security Review report: ① **signing key** — `build.sh` no longer copies `debug.keystore` into `assets/source` (so it is no longer extracted to `/sdcard`), private release keys are supported via `KEYSTORE`/`KEYSTORE_PASS`/`KEY_PASS`/`KEY_ALIAS`, and signing with the debug key prints a warning; ② **plugins disabled by default** — a **newly appeared** file under `/sdcard` is disabled (`pc_plugins_seen` tracks known files) and must be confirmed in the plugin manager, closing the "another app drops a .js → next launch gets Termux command ability" hole; ③ **removed the Pyodide CDN fallback** (jsDelivr without SRI); ④ **default C++ engine is now JSCPP** (no more silent uploads to Wandbox/Judge0); ⑤ **bridge path validation** — whitelist names in `saveFileIn`/`saveFileEx`, canonical shared-storage checks in `readProject`/`readSingleFile`/`writeProjectFile`; ⑥ quoted the compiler name in `command -v`; ⑦ external links limited to http/https/mailto; ⑧ `allowBackup=false`; ⑨ compile cache md5→sha256; ⑩ docs gained a "Security notes" section with corrected sandbox/online-compile wording. versionCode 50 |
 | **v5.4.0** | y (performance + wallpaper + plugin sandbox) | (1) **Performance**: cursor updates coalesced via rAF, built-in plugins **loaded in parallel**, `contain: strict` render isolation on the editor container, 800 KB big-file threshold; (2) **Custom wallpaper**: Settings → Edit → "🖼 Wallpaper", 4 preset gradients + **local images** (auto-compressed to ≤1440px JPEG) + 5–80% opacity, persisted in localStorage, editor background adapts transparently; (3) **Plugin sandbox**: `/sdcard` plugins can switch to "🧪 sandbox" — code runs in a **Web Worker** with **no window / document / Android bridge / localStorage**, using async RPC for a restricted API (getText/setText/runCommand/currentLanguage/registerCommand/t/log); the plugin page shows sandbox status and a stop button. Honest limit: the Worker can still make network requests. versionCode 49 |

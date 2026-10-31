@@ -64,7 +64,7 @@
       }
 
       /* ---------- 通用面板 ---------- */
-      var mode = 'file', items = [], sel = 0, pendingReplace = null;
+      var mode = 'file', items = [], sel = 0;
       function panel() {
         var el = document.getElementById('nav-panel');
         if (el) return el;
@@ -94,12 +94,16 @@
         return el;
       }
       function close() { var el = document.getElementById('nav-panel'); if (el) el.classList.add('hidden'); if (view()) try { E.focus(); } catch (e) {} }
-      function open(m, title) {
+      function open(m, title, initial) {
+        /* v5.6.0：全局搜索 / 全局符号 / 书签需要所有文件内容；按需加载模式下先补读 */
+        if ((m === 'search' || m === 'gsymbol' || m === 'bookmark') && E.ensureAll) {
+          try { E.ensureAll(); } catch (e) {}
+        }
         mode = m;
         var el = panel();
         el.classList.remove('hidden');
         el.querySelector('#nv-title').textContent = title;
-        el.querySelector('#nv-input').value = '';
+        el.querySelector('#nv-input').value = String(initial == null ? '' : initial);   // v5.9.0：支持从统一搜索预填
         el.querySelector('#nv-input').placeholder = T('nv_ph_' + m, '');
         var showRepl = (m === 'search');
         el.querySelector('#nv-repl').classList.toggle('hidden', !showRepl);
@@ -187,7 +191,6 @@
             }
           });
           if (!hits) body.innerHTML = '<div class="nv-empty">' + T('nv_no_hit', '没有匹配结果') + '</div>';
-          pendingReplace = el.querySelector('#nv-input').value;
         }
         markSel();
       }
@@ -197,16 +200,20 @@
         var rp = String(el.querySelector('#nv-replace').value || '');
         if (!q) return;
         var re;
-        try { re = new RegExp(q, 'g'); } catch (e) { if (api.meta) api.meta(T('nv_bad_re', '正则表达式无效')); return; }
+        /* 与命中预览保持一致（gi），否则会出现"预览 N 处、只替换一部分" */
+        try { re = new RegExp(q, 'gi'); } catch (e) { if (api.meta) api.meta(T('nv_bad_re', '正则表达式无效')); return; }
         var total = 0, filesChanged = 0;
         (E.files ? E.files() : []).forEach(function (f) {
           var before = String(f.content);
           re.lastIndex = 0;
+          var hit = (before.match(re) || []).length;
+          if (!hit) return;
+          re.lastIndex = 0;
           var after = before.replace(re, rp);
-          if (after !== before) { E.setFileContent(f.name, after); filesChanged++; total += (before.length - after.length === 0 ? 1 : 1); }
+          if (after !== before) { E.setFileContent(f.name, after); filesChanged++; total += hit; }
         });
         if (E.saveAll) E.saveAll();
-        if (api.meta) api.meta(T('nv_replaced', '已替换') + '：' + filesChanged + ' ' + T('nv_files', '个文件'));
+        if (api.meta) api.meta(T('nv_replaced', '已替换') + '：' + total + ' · ' + filesChanged + ' ' + T('nv_files', '个文件'));
         render();
       }
 
@@ -246,6 +253,14 @@
       cmd('nav.recent', 'nv_cmd_recent', function () { open('recent', T('nv_title_recent', '最近文件')); return true; });
       cmd('nav.bookmarks', 'nv_cmd_bookmarks', function () { open('bookmark', T('nv_title_bookmarks', '书签')); return true; });
       cmd('nav.toggleBookmark', 'nv_cmd_toggle_bm', toggleBookmark);
+
+      /* v5.9.0：把导航能力暴露给宿主「统一搜索」（顶栏搜索框），支持带初始查询词打开 */
+      api.nav = {
+        files: function (q) { open('file', T('nv_title_open', '快速打开文件'), q); return true; },
+        symbols: function (q) { open('symbol', T('nv_title_symbols', '当前文件符号'), q); return true; },
+        gsymbols: function (q) { open('gsymbol', T('nv_title_gsymbols', '全局符号'), q); return true; },
+        search: function (q) { open('search', T('nv_title_search', '全局搜索替换'), q); return true; }
+      };
 
       /* ---------- 工具栏 ---------- */
       [{ icon: '📂', k: 'nv_cmd_open', id: 'nav.quickOpen', order: 120 },

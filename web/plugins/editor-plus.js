@@ -95,7 +95,8 @@
       function setMcMode(on) {
         mcMode = !!on;
         if (api.meta) api.meta(T(mcMode ? 'ep_mc_on' : 'ep_mc_off', mcMode ? '多光标模式：开（点击空白处加光标）' : '多光标模式：关'));
-        if (mcBtn) { mcBtn.el.style.background = mcMode ? 'rgba(79,124,255,.30)' : ''; }
+        /* 按钮高亮交给宿主按 active() 重绘，避免持有已脱离文档的 DOM 引用 */
+        if (E.refreshToolbar) E.refreshToolbar();
       }
       E.registerCommand('cursor.mode', { label: T('ep_cursorMode', '多光标模式'), group: 'cursor', run: function () { setMcMode(!mcMode); return true; } });
       if (M.EditorView && M.EditorSelection) {
@@ -161,6 +162,9 @@
             hint.textContent = T('ep_snips_hint', '自定义片段保存在本机，保存后立即生效；模板用 ${name} 表示可跳转占位。');
             box.appendChild(hint);
             var user = loadUser();
+            var editRef = null;   // v5.9.0：当前正在就地编辑的片段 { lang, idx }
+            /* 这些控件定义在 renderBox 内部，但「编辑」按钮（row）要用它们回填表单，故提到闭包层 */
+            var form, langSel, inLabel, inDetail, inTpl, save;
 
             function row(lang, sn, idx) {
               var d = document.createElement('div'); d.className = 'pp-card';
@@ -174,6 +178,18 @@
               pre.textContent = sn.template;
               d.appendChild(pre);
               var foot = document.createElement('div'); foot.className = 'pp-card-foot';
+              var ed = document.createElement('button'); ed.className = 'pp-btn';
+              ed.textContent = T('ep_edit', '编辑');
+              ed.addEventListener('click', function () {
+                editRef = { lang: lang, idx: idx };
+                langSel.value = lang;
+                inLabel.value = sn.label;
+                inDetail.value = sn.detail || '';
+                inTpl.value = sn.template;
+                save.textContent = T('ep_save_edit', '保存修改');
+                try { form.scrollIntoView({ block: 'nearest' }); inLabel.focus(); } catch (e) {}
+              });
+              foot.appendChild(ed);
               var del = document.createElement('button'); del.className = 'pp-btn';
               del.textContent = T('ep_del', '删除');
               del.addEventListener('click', function () {
@@ -199,29 +215,39 @@
                 box2.appendChild(e0);
               }
               // 新增表单
-              var form = document.createElement('div'); form.className = 'pp-card';
+              form = document.createElement('div'); form.className = 'pp-card';
               var h2 = document.createElement('div'); h2.className = 'pp-card-head';
               var t2 = document.createElement('span'); t2.className = 'pp-card-name'; t2.textContent = T('ep_add', '新增片段');
               h2.appendChild(t2); form.appendChild(h2);
-              var langSel = document.createElement('select');
+              langSel = document.createElement('select');
               ['python', 'cpp'].forEach(function (l) { var o = document.createElement('option'); o.value = l; o.textContent = l; langSel.appendChild(o); });
               langSel.style.cssText = 'margin:8px 0;padding:6px;border-radius:6px;background:#1e1e1e;color:#ddd;border:1px solid #444';
               form.appendChild(langSel);
-              var inLabel = document.createElement('input'); inLabel.placeholder = T('ep_snip_label', '触发词，如 mylog');
-              var inDetail = document.createElement('input'); inDetail.placeholder = T('ep_snip_detail', '说明（可空）');
-              var inTpl = document.createElement('textarea'); inTpl.placeholder = T('ep_snip_tpl', '模板，例如 print(${x})');
+              inLabel = document.createElement('input'); inLabel.placeholder = T('ep_snip_label', '触发词，如 mylog');
+              inDetail = document.createElement('input'); inDetail.placeholder = T('ep_snip_detail', '说明（可空）');
+              inTpl = document.createElement('textarea'); inTpl.placeholder = T('ep_snip_tpl', '模板，例如 print(${x})');
               [inLabel, inDetail, inTpl].forEach(function (el) {
                 el.style.cssText = 'display:block;width:100%;margin:6px 0;padding:8px;border-radius:6px;background:#1e1e1e;color:#ddd;border:1px solid #444;font-family:inherit';
                 form.appendChild(el);
               });
               inTpl.rows = 4;
-              var save = document.createElement('button'); save.className = 'pp-btn';
+              save = document.createElement('button'); save.className = 'pp-btn';
               save.textContent = T('ep_save', '保存');
               save.addEventListener('click', function () {
                 var l = langSel.value, lab = inLabel.value.trim(), tpl = inTpl.value;
                 if (!lab || !tpl) { if (api.meta) api.meta(T('ep_need', '触发词和模板都不能为空')); return; }
-                user[l] = user[l] || [];
-                user[l].push({ label: lab, detail: inDetail.value.trim(), template: tpl });
+                var item = { label: lab, detail: inDetail.value.trim(), template: tpl };
+                if (editRef && user[editRef.lang] && user[editRef.lang][editRef.idx]) {
+                  /* v5.9.0：就地编辑——语言也允许改（从旧语言搬到新语言） */
+                  if (editRef.lang === l) user[l][editRef.idx] = item;
+                  else { user[editRef.lang].splice(editRef.idx, 1); user[l] = user[l] || []; user[l].push(item); }
+                  editRef = null;
+                  save.textContent = T('ep_save', '保存');
+                  inLabel.value = ''; inDetail.value = ''; inTpl.value = '';
+                } else {
+                  user[l] = user[l] || [];
+                  user[l].push(item);
+                }
                 saveUser(user); applySnippets();
                 if (api.meta) api.meta(T('ep_saved', '已保存'));
                 renderBox(box2);
@@ -274,27 +300,26 @@
       } });
 
       /* ---- 工具栏 ---- */
-      var mcBtn = null;
       var TB = [
-        { icon: '↶', k: 'ep_undo', order: 10, cmd: 'edit.undo' },
-        { icon: '↷', k: 'ep_redo', order: 20, cmd: 'edit.redo' },
-        { icon: '⇤', k: 'ep_indentLess', order: 30, cmd: 'edit.indentLess' },
-        { icon: '⇥', k: 'ep_indentMore', order: 40, cmd: 'edit.indentMore' },
-        { icon: '▸', k: 'ep_foldToggle', order: 50, cmd: 'fold.toggle' },
+        { icon: '↶', k: 'ep_undo', order: 10, cmd: 'edit.undo', id: 'edit.undo' },
+        { icon: '↷', k: 'ep_redo', order: 20, cmd: 'edit.redo', id: 'edit.redo' },
+        { icon: '⇤', k: 'ep_indentLess', order: 30, cmd: 'edit.indentLess', id: 'edit.indentLess' },
+        { icon: '⇥', k: 'ep_indentMore', order: 40, cmd: 'edit.indentMore', id: 'edit.indentMore' },
+        { icon: '▸', k: 'ep_foldToggle', order: 50, cmd: 'fold.toggle', id: 'fold.toggle' },
         { icon: '⊕', k: 'ep_cursorMode', order: 60, cmd: 'cursor.mode', id: 'mc' },
-        { icon: '≡', k: 'ep_lineOps', order: 70, cmd: 'ui.commands.line' },
-        { icon: '✨', k: 'ep_formatLight', order: 90, cmd: 'format.light' }
+        { icon: '≡', k: 'ep_lineOps', order: 70, cmd: 'ui.commands.line', id: 'ui.commands.line' },
+        { icon: '✨', k: 'ep_formatLight', order: 90, cmd: 'format.light', id: 'format.light' }
       ];
       if (E.addToolbarButton) {
         for (var i = 0; i < TB.length; i++) (function (b) {
-          var el = E.addToolbarButton({
-            icon: b.icon, label: T(b.k, b.cmd), order: b.order,
+          E.addToolbarButton({
+            icon: b.icon, label: T(b.k, b.cmd), order: b.order, id: b.id,
+            active: function () { return b.id === 'mc' ? mcMode : false; },
             run: function () {
               if (b.cmd === 'ui.commands.line') { if (E.openCommandPalette) E.openCommandPalette('line.', { noInput: true, title: T('ep_lineOps', '行操作') }); return; }
               if (E.runCommand) E.runCommand(b.cmd);
             }
           });
-          if (b.id === 'mc') mcBtn = { el: el };
         })(TB[i]);
       }
       E.registerCommand('ui.commands.line', { label: T('ep_lineOps', '行操作'), group: 'ui', run: function () { if (E.openCommandPalette) E.openCommandPalette('line.', { noInput: true, title: T('ep_lineOps', '行操作') }); } });

@@ -1,4 +1,6 @@
-# 轻码编辑器 QingCode v5.4.2 · 源码说明
+# 轻码编辑器 QingCode v5.10.0 · 源码说明
+
+**中文** · [English](README_EN.md)
 
 **中文** · [English](README_EN.md)
 
@@ -30,12 +32,20 @@
 | 🧠 代码理解 | 语义分析 / 类型提示 / 错误警告 / 跳转定义 / 查找引用 / 查看实现 / 符号搜索 / 内联文档 / 调用层级（Python 用 ast 真语义，C++ 启发式） |
 | 🧭 导航与搜索 | 快速打开文件 · 类/方法/符号跳转 · 全局搜索替换（支持正则）· 最近文件 · 书签 |
 | 🖼 壁纸 | 预设渐变 / 本地图片 / 透明度调节，持久化 |
-| 🧪 插件沙箱 | 第三方插件**默认**在 Web Worker 中隔离运行（无 DOM / 原生桥 / 本地存储访问）；仅可信插件可关闭 |
+| 🔐 插件信任 | 按**内容指纹（SHA-256）+ 逐项权限**授权：未授权的插件不运行，文件被改后授权自动失效；批准后源码复制到应用私有目录，共享目录只作导入入口 |
+| 🧪 插件沙箱 | 第三方插件**默认**在 Web Worker 中隔离运行（无 DOM / 原生桥 / 本地存储访问）；可信插件可在「沙箱运行中」卡片上点「信任并改为主线程运行」解除（需二次确认） |
 | ⚙ 控制面板 | 顶栏命令搜索框（与运行同高）+ 命令面板置顶入口 + VS Code 风格控制面板（骨架） |
+| 🖥 移动工作台 | **终端 / 输出 / 问题** 三个独立面板（问题可点击跳转）· 目录树按需展开 · 可配置键条（Esc/Tab/方向键/符号）· 软键盘让位 · 横屏与平板布局 · 外接键盘快捷键 |
+| 🔎 统一搜索 | 顶栏搜索框一次搜「文件 / 符号 / 全文」，文件结果内联、符号与全文带查询词跳转；命令面板最近使用置顶 |
+| 🧠 LanguageService | 统一异步协议（diagnostics / completion / definition / references / documentSymbol），请求带 `documentUri`+`documentVersion`+`requestId`，支持取消与**过期结果丢弃**；分析默认走**独立 Pyodide 实例**，不与用户程序共用 |
+| 🗂 多标签 | 每个文件一个标签（上限 12），**选区 / 滚动 / 撤销历史按文件隔离**；关闭标签不删文件；标签带未保存圆点 |
+| 🔐 SAF 工作区 | 用系统目录授权打开工作区（`ACTION_OPEN_DOCUMENT_TREE` + 持久授权），**普通编辑不再需要「所有文件访问」**；路径逐段按名字解析、写入只能落在授权的目录树内；保存用「临时文件 + 替换」，失败自动用备份恢复并给出原因 |
+| ⚙️ 项目配置 | 项目根放 `.qingcode.json` 即可声明 `entry` / `sources` / `includeDirs` / `compiler` / `standard` / `flags` / `args` / `env` / `cwd` / `timeoutSec`；**多源文件一起编译**，缓存键覆盖源文件、头文件、flags 与编译器版本，并有条数/容量上限与 LRU |
+| 💾 工作区恢复 | 重启后恢复上次项目、**标签集合**、活动文件与**未保存修改**（草稿与元数据存 IndexedDB）；保存前校验磁盘版本，外部改过的文件**不静默覆盖**；**大项目按需加载**（打开文件时才读取内容） |
 
 ## 下载 APK
 
-前往 [Releases](../../releases) 下载最新 `轻码编辑器-QingCode-v5.4.2.apk`（版本历史见下文版本表）。完整使用教程见 [使用说明.md](使用说明.md)（English: [使用说明_EN.md](使用说明_EN.md)）。
+前往 [Releases](../../releases) 下载最新 `轻码编辑器-QingCode-v5.10.0.apk`（版本历史见下文版本表）。完整使用教程见 [使用说明.md](使用说明.md)（English: [使用说明_EN.md](使用说明_EN.md)）。
 
 ## 架构
 
@@ -78,12 +88,14 @@ QingCode-源码/
 ├── build.sh                    # 一键构建（自动组装 assets → aapt2 → javac → d8 → 签名）；并生成 assets/source 源码快照（含 res 图标、vendor/JSCPP.js 与 licenses/，仅排除 Pyodide 二进制）
 ├── plugins/                    # v4.4 插件接口：接口说明（中/英）+ 语言插件示例骨架（插件放手机 /sdcard/QingCode/plugins/）
 ├── licenses/                   # 第三方开源组件许可证原文（CodeMirror / Pyodide+CPython / JSCPP / lodash / Emscripten / Termux / Judge0 / Wandbox，索引见其 README）
-├── debug.keystore              # 调试签名（口令见 build.sh；缺失时构建自动生成）
-├── LICENSE                     # MIT 许可证（含开发者联系方式与问题反馈邮箱）
+├── debug.keystore              # 本地调试签名（已由 .gitignore 排除，不随仓库分发；缺失时构建自动生成，口令见 build.sh）
+├── LICENSE                     # MIT 许可证（标准英文全文）
 ├── README.md / README_EN.md    # 本文件：功能、架构、目录、机制、构建与二次开发
-├── CHANGELOG.md / CHANGELOG_EN.md # 完整版本历史（48 个版本 + 近期详情）
+├── CHANGELOG.md / CHANGELOG_EN.md # 完整版本历史（51 个版本 + 近期详情）
 ├── 使用说明.md                  # 面向使用者的完整教程（安装/配置/常见问题）
+├── tests/e2e/                  # 前端交互回归（无头浏览器 + CDP，44 项断言）
 ├── 使用说明_EN.md               # User guide in English（与中文版内容对应）
+├── TODO.md                     # 路线图与待办（按阶段排列，含里程碑验收标准）
 ├── .gitignore                  # GitHub 上传用（Android 模板 + 构建产物排除）
 ```
 
@@ -135,10 +147,11 @@ cd web && python3 -m http.server 8899
 
 # 构建 APK
 ANDROID_SDK_ROOT=/opt/android-sdk ./build.sh
-# 产物：build/QingCode.apk（versionName 5.4.0 / versionCode 49）
+# 产物：build/QingCode.apk（versionName 5.10.0 / versionCode 59）
 ```
 
 依赖：JDK 11+、Android SDK（build-tools;34.0.0、platforms;android-34）。首次构建自动生成 `debug.keystore`（口令见 build.sh）。
+项目路径含**中文或空格**也能直接构建（`build.sh` 对 aapt2 使用相对路径调用；d8 / zipalign / apksigner 本身无此问题）。
 
 ## 二次开发指引
 
@@ -152,7 +165,7 @@ ANDROID_SDK_ROOT=/opt/android-sdk ./build.sh
 | 流式轮询间隔 | `MainActivity.java` 200ms handler |
 | 超时时长 | 前端 `Android.runCpp(…, 60)` 与 Termux 脚本内 `timeout 50` |
 | C++ 示例代码 | `web/app.js` 顶部 `CPP_DEFAULT_CODE`（STL 交互版）/ `CPP_JSCPP_CODE`（兜底兼容版） |
-| 应用名 / 版本号 | `AndroidManifest.xml`（当前 versionCode 49 / versionName 5.4.0）+ `web/app.js` `APP_VERSION` |
+| 应用名 / 版本号 | `AndroidManifest.xml`（当前 versionCode 59 / versionName 5.10.0）+ `web/app.js` `APP_VERSION` |
 | 内置插件 / 编辑命令 | `web/plugins/editor-plus.js`（命令 / 工具栏 / 片段 / 格式化），经 `PCPluginAPI.v3` 的 `editor` 接口注册 |
 | 插件扩展面 | `web/app.js` 的 `EditorAPI`（扩展 / 命令 / 工具栏 / 语言 / 补全 / 片段 / 格式化 / 事件）+ `PCCM.modules` |
 | 界面文案双语 | `web/i18n.js` 字典（`data-i18n` 系列属性驱动）；新增界面元素时加属性 + 双语 key |
@@ -172,10 +185,10 @@ npm pack JSCPP@2.0.9 && npx esbuild lib/commonjs.js --bundle --global-name=JSCPP
 
 ## 安全说明
 
-- **签名密钥**：仓库内的 `debug.keystore` 仅用于本地调试，口令公开。**发布 APK 必须使用私有密钥**：
+- **签名密钥**：本地 `debug.keystore` 仅用于调试且口令公开，已加入 `.gitignore`（不随仓库分发；clone 后首次构建会自动生成，签名与已发布 APK 不同，覆盖安装需先卸载）。**发布 APK 必须使用私有密钥**：
   `KEYSTORE=/path/to/release.jks KEYSTORE_PASS=... ./build.sh`；用 debug 密钥签出的包只应自用。
 - **第三方插件**：`/sdcard/QingCode/plugins/` 下**新出现的插件默认禁用**，需在「插件管理」中确认后启用；
-  **插件默认在「🧪 沙箱」中运行**（Web Worker 内无法访问 DOM / 原生桥 / 存储）；只有对完全信任的插件才可在插件卡片上关闭沙箱改为主线程运行（需二次确认）。
+  **插件默认在「🧪 沙箱」中运行**（Web Worker 内无法访问 DOM / 原生桥 / 存储，但**网络仍可用**）；对完全信任的插件，可在插件管理页的「🧪 沙箱运行中」卡片上点「**信任并改为主线程运行**」解除沙箱（二次确认，重启应用生效）。
 - **在线编译**：C++ 默认引擎为 JSCPP（本机执行），**不会上传代码**；只有显式选择「在线编译」才会把代码发给 Wandbox/Judge0。
 - **路径校验**：原生桥对插件文件名、导出文件名与项目路径做白名单 / canonical 校验，拒绝越界路径；外部链接只交给系统处理 http/https/mailto。
 
@@ -191,4 +204,4 @@ npm pack JSCPP@2.0.9 && npx esbuild lib/commonjs.js --bundle --global-name=JSCPP
 
 > 迭代时**不更改以往文件**：历史版本 APK 保留原文件名，新版本以新文件名交付（源码目录保持最新版，历史以本表记录）。
 
-**完整版本历史（48 个版本）见 [CHANGELOG.md](CHANGELOG.md)。**
+**完整版本历史（51 个版本）见 [CHANGELOG.md](CHANGELOG.md)。**

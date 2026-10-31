@@ -1,6 +1,9 @@
 /* QingCode 插件安全沙箱（Web Worker）
- * 隔离目标：插件无法访问 window / document / Android 原生桥 / localStorage / DOM。
- * 诚实边界：Worker 里仍然可以 fetch 网络；本沙箱隔离的是 DOM 与原生能力，不是网络。
+ * 隔离边界（如实说明）：Worker 内没有 DOM / Android 原生桥 / localStorage；
+ * 网络请求仍然可达（fetch / XMLHttpRequest / WebSocket / importScripts 均可发起请求）。
+ * 下面在 init 分支仅遮蔽逃逸面相关的全局（self / window / document / localStorage）
+ * 作为纵深防御，网络与 IndexedDB 按文档保留；这不是硬隔离
+ * （插件仍可能通过原生原型链绕过）。真正的能力约束来自受限的 PCPluginAPI。
  * 与主线程的通信：受限 PCPluginAPI 通过异步 RPC 转发。 */
 'use strict';
 
@@ -44,8 +47,22 @@ var PCPluginAPI = {
   register: function (p) { registerPlugin(p); }
 };
 
+/* v5.9.0：沙箱里做不到的注册能力给出明确错误（此前是 undefined，调用即 TypeError 且没有解释） */
+function sandboxUnsupported(name) {
+  return function () {
+    var msg = '沙箱内不支持 ' + name + '：Worker 无法注册 DOM / 扩展 / 工具栏。如需该能力，请在插件管理页「信任并改为主线程运行」。';
+    try { self.postMessage({ type: 'error', message: msg }); } catch (e) {}
+    throw new Error(msg);
+  };
+}
+['registerLanguage', 'registerSnippets', 'registerCompletion', 'registerFormatter',
+ 'addToolbarButton', 'removeToolbarButton', 'registerMenu', 'page', 'runCommandSync'
+].forEach(function (k) { PCPluginAPI[k] = sandboxUnsupported(k); });
+
+var pluginMeta = null;
 function registerPlugin(p) {
   if (!p) return;
+  pluginMeta = p;
   try {
     if (typeof p.onInit === 'function') {
       Promise.resolve(p.onInit(PCPluginAPI)).catch(function (e) {
@@ -58,13 +75,28 @@ function registerPlugin(p) {
   }
 }
 
+/** 卸载时清空所有注册状态（宿主随后 terminate，这里只是不留悬挂引用） */
+function destroy() {
+  pluginMeta = null;
+  handlers = Object.create(null);
+  listeners = Object.create(null);
+  pending = Object.create(null);
+}
+
 self.onmessage = function (e) {
   var d = e.data || {};
   if (d.type === 'init') {
     try {
-      /* 在函数作用域内执行插件代码：插件拿不到 self/window（window 在 Worker 中不存在） */
-      var fn = new Function('PCPluginAPI', String(d.src));
-      fn(PCPluginAPI);
+      /* Worker 内没有 DOM / Android 原生桥 / localStorage；网络请求仍可达。
+       * 仅遮蔽逃逸面相关的全局（self / window / document / localStorage）作为
+       * 纵深防御，网络与 IndexedDB 按文档保留（fetch / XMLHttpRequest / WebSocket /
+       * importScripts / indexedDB / caches / globalThis 均不遮蔽）。
+       * 这不是硬隔离：插件仍可能通过原生原型链绕过，例如 (function(){}).constructor。
+       * 真正的能力约束来自受限的 PCPluginAPI。 */
+      var fn = new Function(
+        'PCPluginAPI','self','window','document','localStorage',
+        String(d.src));
+      fn(PCPluginAPI, undefined, undefined, undefined, undefined);
       self.postMessage({ type: 'ready' });
     } catch (err) {
       self.postMessage({ type: 'error', message: String(err && err.message || err) });
@@ -84,15 +116,25 @@ self.onmessage = function (e) {
     for (var i = 0; i < arr.length; i++) { try { arr[i](d.payload); } catch (err) {} }
     return;
   }
+  if (d.type === 'unload') {
+    try {
+      if (pluginMeta && typeof pluginMeta.onUnload === 'function') pluginMeta.onUnload(PCPluginAPI);
+    } catch (e) {
+      self.postMessage({ type: 'error', message: 'onUnload: ' + String(e && e.message || e) });
+    }
+    self.postMessage({ type: 'unloaded', id: String((pluginMeta && pluginMeta.id) || '') });
+    destroy();
+    return;
+  }
   if (d.type === 'call') {
     var h = handlers[d.cmd];
-    if (!h) { self.postMessage({ type: 'call-result', id: d.id, ok: false }); return; }
+    if (!h) { self.postMessage({ type: 'call-result', id: d.id, cmd: d.cmd, ok: false, error: 'unregistered command' }); return; }
     try {
       Promise.resolve(h()).then(function (r) {
-        self.postMessage({ type: 'call-result', id: d.id, ok: true, result: r });
+        self.postMessage({ type: 'call-result', id: d.id, cmd: d.cmd, ok: true, result: r });
       }, function (e) {
-        self.postMessage({ type: 'call-result', id: d.id, ok: false, error: String(e && e.message || e) });
+        self.postMessage({ type: 'call-result', id: d.id, cmd: d.cmd, ok: false, error: String(e && e.message || e) });
       });
-    } catch (err2) { self.postMessage({ type: 'call-result', id: d.id, ok: false, error: String(err2) }); }
+    } catch (err2) { self.postMessage({ type: 'call-result', id: d.id, cmd: d.cmd, ok: false, error: String(err2) }); }
   }
 };

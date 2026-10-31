@@ -28,6 +28,11 @@ KS_PASS="${KEYSTORE_PASS:-pocketcode}"
 KEY_PASS="${KEY_PASS:-pocketcode}"
 KEY_ALIAS="${KEY_ALIAS:-pocketcode}"
 
+# 构建工具/平台存在性预检：缺一即退出，避免构建到中途才失败。
+for _f in "$BT/aapt2" "$BT/d8" "$BT/zipalign" "$BT/apksigner" "$PLATFORM"; do
+  [ -e "$_f" ] || { echo "缺少构建依赖：$_f（请检查 ANDROID_SDK_ROOT / build-tools 版本）" >&2; exit 1; }
+done
+
 rm -rf "$OUT"
 mkdir -p "$OUT/gen" "$OUT/obj" "$OUT/apk" "$OUT/dex"
 
@@ -56,17 +61,21 @@ cp "$PROJ/app/src/main/java/com/qingcode/editor/MainActivity.java" "$SRC_OUT/app
 cp "$PROJ/app/src/main/AndroidManifest.xml" "$SRC_OUT/app/src/main/"
 cp -r "$PROJ/app/src/main/res/." "$SRC_OUT/app/src/main/res/"
 cp -r "$PROJ/licenses/." "$SRC_OUT/licenses/"
-cp "$PROJ/build.sh" "$PROJ/README.md" "$PROJ/README_EN.md" "$PROJ/使用说明.md" "$PROJ/使用说明_EN.md" "$PROJ/CHANGELOG.md" "$PROJ/CHANGELOG_EN.md" "$PROJ/LICENSE" "$SRC_OUT/"
+cp "$PROJ/build.sh" "$PROJ/README.md" "$PROJ/README_EN.md" "$PROJ/使用说明.md" "$PROJ/使用说明_EN.md" "$PROJ/CHANGELOG.md" "$PROJ/CHANGELOG_EN.md" "$PROJ/TODO.md" "$PROJ/LICENSE" "$SRC_OUT/"
 cp "$PROJ/plugins/插件接口说明.md" "$PROJ/plugins/Plugin-API-Guide_EN.md" "$PROJ/plugins/example-lang-plugin.js" "$SRC_OUT/plugins/"
 
 echo "[1/6] aapt2 编译链接资源与 assets"
-"$BT/aapt2" compile --dir "$PROJ/app/src/main/res" -o "$OUT/res.zip"
-"$BT/aapt2" link -o "$OUT/apk/base.apk" \
-  --manifest "$PROJ/app/src/main/AndroidManifest.xml" \
+# v5.4.3：aapt2 通过 ANSI 路径 API 打开目录，项目路径含中文/空格时会报
+#   "failed to open directory: 系统找不到指定的文件"（路径本身是存在的）。
+# 因此在项目根目录下用相对路径调用即可绕开；d8 / zipalign / apksigner 无此问题（已实测）。
+cd "$PROJ"
+"$BT/aapt2" compile --dir app/src/main/res -o build/res.zip
+"$BT/aapt2" link -o build/apk/base.apk \
+  --manifest app/src/main/AndroidManifest.xml \
   -I "$PLATFORM" \
-  --java "$OUT/gen" \
+  --java build/gen \
   --auto-add-overlay \
-  "$OUT/res.zip"
+  build/res.zip
 # 把 assets 追加进 APK
 cd "$PROJ/app/src/main" && zip -q -r "$OUT/apk/base.apk" assets && cd - >/dev/null
 
@@ -96,7 +105,7 @@ fi
 
 echo "[6/6] apksigner 签名"
 if [ "$KEYSTORE" = "$PROJ/debug.keystore" ]; then
-  echo "⚠️  正在使用仓库内的 debug.keystore 签名——仅限调试，请勿发布此 APK！"
+  echo "⚠️  正在使用 debug.keystore 签名（仅限调试，请勿发布此 APK）！"
   echo "    发布请用: KEYSTORE=/path/to/release.jks KEYSTORE_PASS=... ./build.sh"
 fi
 "$BT/apksigner" sign --ks "$KEYSTORE" --ks-pass pass:"$KS_PASS" \

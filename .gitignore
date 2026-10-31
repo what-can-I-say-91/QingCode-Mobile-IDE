@@ -71,3 +71,10 @@ app/src/main/assets/source/
 
 # macOS 垃圾文件
 .DS_Store
+
+# AI 助手工作目录（记忆 / 内部笔记，不随仓库发布）
+.workbuddy/
+
+# E2E 临时浏览器配置
+tests/e2e/.e2e-prof/
+tests/e2e/.termux-prof/

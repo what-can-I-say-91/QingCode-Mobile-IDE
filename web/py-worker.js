@@ -123,9 +123,9 @@ async function initPy(bases) {
       const jsUrl = isHttp ? base + 'pyodide.mjs' : new URL(base + 'pyodide.mjs', import.meta.url).href;
       const idxUrl = isHttp ? base : new URL(base, import.meta.url).href;
       post({ type: 'progress', pct: 30, key: 'splash_compile' });
+      hookWasmCache();   // 必须在 loadPyodide 之前：WASM 编译发生在 loadPyodide 内部
       const mod = await import(jsUrl);
       pyodide = await mod.loadPyodide({ indexURL: idxUrl });
-      hookWasmCache();
       pyodide.setStdout({ raw: (b) => { outBytes.push(b); if (b === 10) flushOut(); } });
       pyodide.setStderr({ raw: (b) => { errBytes.push(b); if (b === 10) flushErr(); } });
       pyodide.setStdin({ stdin: blockingReadLine });

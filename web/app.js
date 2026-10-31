@@ -8,7 +8,7 @@
 'use strict';
 
 /* ---------- 常量 ---------- */
-const APP_VERSION = '5.4.2';
+const APP_VERSION = '5.10.0';
 const PYODIDE_VERSION = '0.26.4';
 /* v5.4.1 安全（审查 #6）：移除 jsDelivr 兜底——CDN 加载无 SRI，可被网络层替换；
    本项目自带 web/pyodide/，本地缺失时应直接报错而不是静默从外部拉取代码。 */
@@ -113,6 +113,9 @@ let running = false;
 let runningKind = null;          // 'python' | 'termux' | 'jscpp'
 let fontSize = parseInt(localStorage.getItem('pc_fontsize') || '14', 10);
 if (!(fontSize >= 10 && fontSize <= 28)) fontSize = 14;
+/* v5.9.0：缩进宽度可配置（此前固定 4） */
+let tabSize = parseInt(localStorage.getItem('pc_tab_size') || '4', 10);
+if (!(tabSize >= 2 && tabSize <= 8)) tabSize = 4;
 /* v5.4.1 安全（审查 #7）：默认 jscpp —— 不再默认把代码上传到在线编译器；
    需要 Termux/在线时由用户显式选择（设置页 → 引擎与 Termux）。 */
 let cppEngine = localStorage.getItem('pc_cpp_engine') || 'jscpp';
@@ -133,30 +136,69 @@ const $ = (id) => document.getElementById(id);
 const state = loadStore();
 
 /* ---------- 存储 ---------- */
+function defaultFiles() {
+  /* v5.7.0：_saved 是「磁盘/初始版本」基线，必须始终有值——否则未保存判据会把未知当成不脏 */
+  return [
+    { name: 'main.py', content: PY_DEFAULT_CODE, _saved: PY_DEFAULT_CODE },
+    { name: 'hello.cpp', content: CPP_DEFAULT_CODE, _saved: CPP_DEFAULT_CODE }
+  ];
+}
 function loadStore() {
-  let files;
-  try { files = JSON.parse(localStorage.getItem('pc_files') || 'null'); } catch { files = null; }
-  if (!files || !files.length) {
-    files = [
-      { name: 'main.py', content: PY_DEFAULT_CODE },
-      { name: 'hello.cpp', content: CPP_DEFAULT_CODE }
-    ];
-  }
+  let files = null, ws = null;
+  try { files = JSON.parse(localStorage.getItem('pc_files') || 'null'); } catch (e) { files = null; }
+  try { ws = JSON.parse(localStorage.getItem('pc_workspace') || 'null'); } catch (e) { ws = null; }
+  /* v5.6.0：有工作区待恢复时先给默认占位——项目内容以磁盘为准，不从 localStorage 反序列化
+     v5.7.0：工作区元数据已迁到 IndexedDB，这里只做旧版残留的兜底 */
+  if (ws && ws.root) return { files: defaultFiles(), active: 'main.py', tabs: ['main.py'] };
+  /* v5.6.0：惰性文件的 content 是 null（内容不持久化），不能当成空文件加载，否则会被误保存为空 */
+  files = (Array.isArray(files) ? files : []).filter(f => f && f.name && typeof f.content === 'string');
+  if (!files.length) files = defaultFiles();
+  /* v5.7.0：补齐 _saved 基线（旧数据 / 默认文件可能没有），否则「未保存」判据永远为假 */
+  for (const f of files) if (typeof f._saved !== 'string') f._saved = f.content;
   let active = localStorage.getItem('pc_active');
   if (!files.some(f => f.name === active)) active = files[0].name;
-  return { files, active };
+  /* v5.7.0 多标签：恢复上次打开的标签集合（仅保留仍然存在的文件） */
+  let tabs = null;
+  try { tabs = JSON.parse(localStorage.getItem('pc_tabs') || 'null'); } catch (e) { tabs = null; }
+  tabs = (Array.isArray(tabs) ? tabs : []).filter(n => typeof n === 'string' && files.some(f => f.name === n));
+  if (!tabs.length) tabs = [active];
+  if (tabs.indexOf(active) < 0) tabs.push(active);
+  return { files, active, tabs };
 }
 function saveStore() {
   try {
-    localStorage.setItem('pc_files', JSON.stringify(state.files));
+    /* v5.6.0：项目模式不把文件内容塞进 localStorage（内容在磁盘上，惰性文件为 null） */
+    const forStore = projectMode()
+      ? state.files.map(f => ({ name: f.name, content: null, _size: f._size == null ? null : f._size }))
+      : state.files;
+    localStorage.setItem('pc_files', JSON.stringify(forStore));
     localStorage.setItem('pc_active', state.active || '');
+    localStorage.setItem('pc_tabs', JSON.stringify(state.tabs || []));
     localStorage.setItem('pc_fontsize', String(fontSize));
+    localStorage.setItem('pc_tab_size', String(tabSize));
     localStorage.setItem('pc_cpp_engine', cppEngine);
     localStorage.setItem('pc_cpp_compiler', cppCompiler);
     localStorage.setItem('pc_py_engine', pyEngine);
     localStorage.setItem('pc_encoding', exportEncoding);
     localStorage.setItem('pc_autosave', autoSaveOn ? 'on' : 'off');
-  } catch (e) { console.warn('save failed', e); }
+    saveWorkspaceMeta();   // v5.5.0：工作区元数据（不含内容），重启后据此恢复
+  } catch (e) {
+    /* v5.7.0：配额不足 / 存储被禁用时不再只写 console —— 状态栏 + 终端都要能看见 */
+    console.warn('save failed', e);
+    storeIssue(t('store_meta_fail'));
+  }
+}
+/* ---------- v5.7.0 存储异常可见化 ---------- */
+const storeIssues = new Set();
+/** 在状态栏亮出存储异常；同一类问题只在终端提示一次 */
+function storeIssue(msg) {
+  const el = $('status-store');
+  if (el) { el.textContent = '⚠ ' + msg; el.title = msg; el.classList.remove('hidden'); }
+  if (!storeIssues.has(msg)) { storeIssues.add(msg); outAppend('⚠ ' + msg + '\n', 'out-err'); }
+}
+function storeOk() {
+  const el = $('status-store');
+  if (el) { el.classList.add('hidden'); el.textContent = ''; el.removeAttribute('title'); }
 }
 
 /* ---------- 语言 ---------- */
@@ -167,7 +209,7 @@ function langOf(name) {
       n.endsWith('.hpp') || n.endsWith('.h') || n.endsWith('.c')) return 'cpp';
   return null;
 }
-function langLabel(lang) { return lang === 'python' ? 'Python' : lang === 'cpp' ? 'C++' : '文本'; }
+function langLabel(lang) { return lang === 'python' ? 'Python' : lang === 'cpp' ? 'C++' : t('lang_text'); }
 /* v5.0：高亮语言与可运行语言解耦——js/json/html/css/markdown 只高亮、不参与运行分流 */
 function hlLangOf(name) {
   const n = String(name || '').toLowerCase();
@@ -194,17 +236,147 @@ async function urlExists(url) {
 }
 
 /* ---------- 终端输出 ---------- */
-function outAppend(text, cls) {
+/* v5.4.3 修复（审查 #19）：逐行输出会为每个 chunk 建一个 <span>，十万行即十万 DOM 节点，
+   长时间运行会把终端拖到卡死。保留最近 MAX_OUT_NODES 个节点（滚动缓冲语义）。 */
+const MAX_OUT_NODES = 4000;
+const MAX_OUT_BYTES = 1536 * 1024;   // v5.10.0：字节上限（与节点上限并行，死循环打印时两道闸）
+let outPending = [];                  // 待刷新的片段（同一任务内的多次输出合并成一次 DOM 写入）
+let outPendingChars = 0;
+let outScheduled = false;
+let outCharsNow = 0;
+function outFlush() {
+  outScheduled = false;
+  if (!outPending.length) return;
   const log = $('output-log');
+  if (!log) { outPending = []; outPendingChars = 0; return; }
   const hint = log.querySelector('.out-hint'); if (hint) hint.remove();
-  const span = document.createElement('span');
-  if (cls) span.className = cls;
-  span.textContent = text;
-  log.appendChild(span);
-  $('output-view').scrollTop = $('output-view').scrollHeight;
+  // 相邻同类片段先合并：循环打印 10 万行 → 一个文本节点，而不是 10 万个 <span>
+  const runs = [];
+  for (const it of outPending) {
+    const last = runs[runs.length - 1];
+    if (last && last.cls === it.cls) last.text += it.text;
+    else runs.push({ cls: it.cls, text: it.text });
+  }
+  outPending = []; outPendingChars = 0;
+  const frag = document.createDocumentFragment();
+  for (const r of runs) {
+    /* 单段就超过总上限（例如一次推送几 MB）：只保留尾部，否则字节上限形同虚设 */
+    let text = r.text;
+    if (text.length > MAX_OUT_BYTES) {
+      text = '…（前 ' + Math.round((text.length - MAX_OUT_BYTES) / 1024) + 'KB 已省略）\n'
+        + text.slice(text.length - MAX_OUT_BYTES);
+    }
+    const span = document.createElement('span');
+    if (r.cls) span.className = r.cls;
+    span.textContent = text;
+    frag.appendChild(span);
+    outCharsNow += text.length;
+  }
+  log.appendChild(frag);
+  /* 双上限：节点数（滚动缓冲语义）+ 字符数（单个节点就能撑爆内存的情形） */
+  while (log.childNodes.length > MAX_OUT_NODES) {
+    const n = log.firstChild;
+    outCharsNow -= (n.textContent || '').length;
+    log.removeChild(n);
+  }
+  while (outCharsNow > MAX_OUT_BYTES && log.childNodes.length > 1) {
+    const n = log.firstChild;
+    outCharsNow -= (n.textContent || '').length;
+    log.removeChild(n);
+  }
+  const v = $('output-view');
+  if (v) v.scrollTop = v.scrollHeight;
 }
-function outClear() { $('output-log').innerHTML = '<span class="out-hint">' + t('out_hint_ready') + '</span>'; }
-function outMeta(text) { outAppend(text + '\n', 'out-meta'); }
+function outAppend(text, cls) {
+  const str = String(text == null ? '' : text);
+  if (!str) return;
+  const c = cls || '';
+  const last = outPending[outPending.length - 1];
+  /* 入队时先合并同类：避免「一个任务内推 10 万行」把队列撑成 10 万个对象 */
+  if (last && last.cls === c) {
+    last.text += str;
+    outPendingChars += str.length;
+    /* 同类合并不能无上限增长：超过总上限就只留尾部 */
+    if (last.text.length > MAX_OUT_BYTES) {
+      outPendingChars -= last.text.length - MAX_OUT_BYTES;
+      last.text = last.text.slice(last.text.length - MAX_OUT_BYTES);
+    }
+  }
+  else { outPending.push({ text: str, cls: c }); outPendingChars += str.length; }
+  /* 队列本身也不能无限涨：超过字节上限就丢掉前面积压的 */
+  while (outPendingChars > MAX_OUT_BYTES && outPending.length > 1) {
+    outPendingChars -= outPending[0].text.length;
+    outPending.shift();
+  }
+  if (!outScheduled) { outScheduled = true; queueMicrotask(outFlush); }
+}
+function outClear() {
+  outPending = []; outPendingChars = 0; outScheduled = false; outCharsNow = 0;
+  $('output-log').innerHTML = '<span class="out-hint">' + t('out_hint_ready') + '</span>';
+}
+function outMeta(text) { outAppend(text + '\n', 'out-meta'); logAppend(text); }
+
+/* ============================================================
+ * v5.9.0：底部三个面板 —— 终端（程序输出）/ 输出（状态消息）/ 问题（诊断）
+ * 终端保持原有行为；状态消息另存一份到「输出」；诊断另存一份到「问题」并支持点击跳转。
+ * ============================================================ */
+let panelTab = 'term';
+const LOG_MAX_LINES = 500;
+const logLines = [];
+function logAppend(text) {
+  const s = String(text == null ? '' : text);
+  if (!s) return;
+  logLines.push(s);
+  while (logLines.length > LOG_MAX_LINES) logLines.shift();
+  const v = $('log-view');
+  if (v) {
+    v.textContent = logLines.join('\n');
+    const pane = $('panel-log');
+    if (pane && panelTab === 'log') pane.scrollTop = pane.scrollHeight;
+  }
+}
+let panelProblems = [];
+function setPanelProblems(list) {
+  panelProblems = (list || []).map(function (e) {
+    return { line: e.line || 1, col: e.col || 1, message: e.message || '' };
+  });
+  renderProblems();
+}
+function renderProblems() {
+  const box = $('prob-list');
+  if (!box) return;
+  box.innerHTML = '';
+  const badge = $('prob-count');
+  if (!panelProblems.length) {
+    const em = document.createElement('div'); em.className = 'pp-empty'; em.textContent = t('pn_no_problems');
+    box.appendChild(em);
+    if (badge) { badge.classList.add('hidden'); badge.textContent = '0'; }
+    return;
+  }
+  if (badge) { badge.classList.remove('hidden'); badge.textContent = String(panelProblems.length); }
+  panelProblems.forEach(function (p) {
+    const b = document.createElement('button');
+    b.className = 'prob-row'; b.type = 'button';
+    const loc = document.createElement('span'); loc.className = 'prob-loc'; loc.textContent = 'L' + p.line + ':' + p.col;
+    const msg = document.createElement('span'); msg.className = 'prob-msg'; msg.textContent = p.message;
+    b.appendChild(loc); b.appendChild(msg);
+    b.addEventListener('click', function () {
+      if (typeof EditorAPI !== 'undefined' && EditorAPI.gotoLine) EditorAPI.gotoLine(p.line, p.col);
+    });
+    box.appendChild(b);
+  });
+}
+function switchPanelTab(id) {
+  panelTab = id;
+  const map = { term: ['ptab-output', 'output-view'], log: ['ptab-log', 'panel-log'], problems: ['ptab-problems', 'panel-problems'] };
+  Object.keys(map).forEach(function (k) {
+    const btn = $(map[k][0]), pane = $(map[k][1]);
+    if (btn) btn.classList.toggle('active', k === id);
+    if (pane) pane.classList.toggle('hidden', k !== id);
+  });
+  const row = $('term-input-row');
+  if (row) row.classList.toggle('hidden', id !== 'term');
+}
 function outEcho(text) { outAppend('> ' + text + '\n', 'out-echo'); }
 
 function setPyState(s, text) {
@@ -236,7 +408,11 @@ function resolveCppEngine(silent) {
   if (cppEngine === 'auto') {
     if (!window.Android || !Android.runCpp) return 'jscpp';
     if (termuxOk) return 'termux';
-    return navigator.onLine === false ? 'jscpp' : 'online';   // 无 Termux 且有网 → 在线
+    /* v5.4.3 修复（审查 #4）：auto 在缺少 Termux 时一律回退内置 JSCPP。
+       旧逻辑「有网 → online」会在用户不知情时把源码上传到 Wandbox/Judge0，
+       与 v5.4.1「默认不上传代码」的承诺、以及 runCurrent 的错误提示文案都矛盾。
+       在线引擎必须由用户在设置里显式选择。 */
+    return 'jscpp';
   }
   return 'jscpp';
 }
@@ -315,7 +491,7 @@ function probeTermux() {
   }
   applyTermuxAvailability();
   updateCppStateUi();
-  if (state.active) openFile(state.active);
+  if (state.active) updateEngineStatus();   // v5.4.3：只刷新状态栏，不再重开文件（避免清掉错误标注）
 }
 
 /* ---------- v4.9：Termux 可用性 —— 未安装则取消所有 Termux 编译项目，仅保留内置/在线引擎 ---------- */
@@ -343,7 +519,7 @@ function guardTermux() {
 }
 
 /* ---------- 交互输入 ---------- */
-/** 同步获取一行输入：安卓原生对话框 / 浏览器 prompt；取消 => EOF('') */
+/** 同步获取一行输入：安卓原生对话框 / 浏览器 prompt；取消 => null（EOF） */
 function interactInput(promptText) {
   let v;
   if (window.Android && Android.requestInput) {
@@ -351,11 +527,12 @@ function interactInput(promptText) {
   } else {
     v = window.prompt(promptText || '程序请求输入：');
   }
-  const isEof = (v === null || v === undefined);   // v4.11.2：区分「取消（EOF）」与「输入空行」，空行不再被当成 EOF
-  v = isEof ? '' : String(v);
+  const isEof = (v === null || v === undefined);   // v4.11.2：区分「取消（EOF）」与「输入空行」
   if (isEof) outAppend('(EOF，输入被取消)\n', 'out-err');
-  else outEcho(v);
-  return v;
+  else outEcho(String(v));
+  /* v5.4.3 修复（审查 #5）：EOF 必须回传 null 才能让 Pyodide 的 stdin 协议与
+     Python 侧包装都识别为「流结束」；返回 '' 会被当成用户敲了一个空行。 */
+  return isEof ? null : String(v);
 }
 /** 多行一次性输入（内置 JSCPP 兜底用） */
 function collectMultiInput() {
@@ -387,19 +564,48 @@ function patchPyodideInput(py) {
       'def _pc_make_input():\n' +
       '    from js import __pcInteractInput as _f\n' +
       '    def _pc_input(prompt=""):\n' +
-      '        return _f(prompt)\n' +
+      '        v = _f(prompt)\n' +
+      '        if v is None:\n' +
+      '            raise EOFError("EOF when reading a line")\n' +
+      '        return v\n' +
       '    return _pc_input\n' +
       '_b.input = _pc_make_input()\n' +
       'del _b, _pc_make_input\n');
   } catch (e) { console.warn('[pyodide] input() patch failed', e); }
 }
 
+/* v5.9.0：主线程回退模式下的中断支持。
+   Pyodide 提供 setInterruptBuffer：往共享缓冲写 2，运行中的 Python 会抛 KeyboardInterrupt。
+   此前主线程模式只能提示「无法中断」，现在可以真正打断无限循环。 */
+let pyInterrupt = null;
+function ensurePyInterrupt(py) {
+  if (pyInterrupt) return true;
+  try {
+    if (!py || typeof py.setInterruptBuffer !== 'function') return false;
+    if (typeof SharedArrayBuffer === 'undefined') return false;
+    pyInterrupt = new Int32Array(new SharedArrayBuffer(4));
+    py.setInterruptBuffer(pyInterrupt);
+    return true;
+  } catch (e) { pyInterrupt = null; return false; }
+}
+function interruptMainThreadPy() {
+  if (!pyInterrupt) return false;
+  try { Atomics.store(pyInterrupt, 0, 2); } catch (e) { return false; }
+  /* 中断送达后要把标志清掉，否则下一次运行会立即再抛 KeyboardInterrupt */
+  setTimeout(function () { try { Atomics.store(pyInterrupt, 0, 0); } catch (e) {} }, 1200);
+  return true;
+}
+
 /* ---------- CodeMirror 6 ---------- */
 let cursorRaf = null, cursorL = 1, cursorC = 1;
+let curHlLang = undefined;   /* v5.4.3：记录编辑器当前的语言包，供 openFile 判断是否需要重配 */
 const BIG_FILE_BYTES = 800 * 1024;   /* v5.4：超过 800KB 进入「大文件模式」 */
 function isBigFile(name) {
   const f = state.files.find(x => x.name === name);
-  return !!(f && f.content && f.content.length > BIG_FILE_BYTES);
+  if (!f) return false;
+  /* v5.6.0：惰性文件还没有内容，用元数据里的体积估算 */
+  if (f.content != null) return f.content.length > BIG_FILE_BYTES;
+  return (f._size || 0) > BIG_FILE_BYTES;
 }
 async function initEditor() {
   await loadScript('vendor/cm6.js');
@@ -413,7 +619,9 @@ async function initEditor() {
       if (cur) { cur.content = t; scheduleSave(); }
       if (up && up.docChanged) {
         clearErrorsTouchedBy(up);   // v4.1.1：编辑过的标红行立即取消标红
+        try { LS.bump(LS.uriOf()); } catch (e) {}   // v5.9.0：文档版本 +1，过期分析结果会被丢弃
         pcEmit('docChange', { text: t, update: up });
+        refreshActiveTabDirty();    // v5.7.0：标签上的未保存圆点
       }
     },
     onCursor: (l, c) => {
@@ -428,52 +636,264 @@ async function initEditor() {
     }
   });
   editorReady = true;
+  try { PCCM.setTabSize(cm, tabSize); } catch (e) {}   // v5.9.0：按用户设置初始化缩进
+  curHlLang = hlLangOf(f.name);
   try { applyWallpaper(loadWallpaper()); } catch (e) {}   /* v5.4 恢复壁纸 */
   openFile(f.name);
   renderToolbar();
 }
 let saveTimer = null;
-function scheduleSave() { clearTimeout(saveTimer); saveTimer = setTimeout(saveStore, 400); }
+function scheduleSave() {
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(function () { saveStore(); scheduleDraft(); }, 400);
+}
+
+/* ---------- v5.7.0 多标签 + 每文件 EditorState ----------
+ * 单个 EditorView 复用；每个标签保存自己的 EditorState（选区 / 撤销历史 / 折叠等）
+ * 与滚动位置，切回来时 setState 还原，撤销栈也一并回来。
+ * 内存：每标签多存一份文档 rope + 历史，所以标签数设上限，超出淘汰最久未用的非活动标签。 */
+const MAX_TABS = 12;
+const viewStates = new Map();   // name -> { state, scrollTop }
+
+function tabList() { if (!Array.isArray(state.tabs)) state.tabs = []; return state.tabs; }
+
+/** 把文件加入标签集合；超出上限时淘汰最久未用的非活动标签 */
+function ensureTab(name) {
+  const tabs = tabList();
+  if (tabs.indexOf(name) < 0) tabs.push(name);
+  while (tabs.length > MAX_TABS) {
+    const idx = tabs.findIndex(n => n !== state.active && n !== name);
+    if (idx < 0) break;
+    const gone = tabs.splice(idx, 1)[0];
+    viewStates.delete(gone);
+  }
+}
+function dropTab(name) {
+  const tabs = tabList();
+  const i = tabs.indexOf(name);
+  if (i >= 0) tabs.splice(i, 1);
+  viewStates.delete(name);
+}
+/** 只刷新活动标签的「未保存」小圆点（输入时不重建整个标签栏） */
+function refreshActiveTabDirty() {
+  const box = $('tabs');
+  if (!box) return;
+  const f = state.files.find(x => x.name === state.active);
+  if (!f) return;
+  const dirty = (f.content !== null && f._saved !== undefined && f._saved !== null && f.content !== f._saved);
+  for (const tab of box.children) {
+    if (!tab.classList || !tab.classList.contains('active')) continue;
+    const dot = tab.querySelector('.dot-dirty');
+    if (dirty && !dot) {
+      const d = document.createElement('span');
+      d.className = 'dot-dirty'; d.title = t('tab_dirty');
+      const nameEl = tab.querySelector('.fname');
+      tab.insertBefore(d, nameEl || null);
+    } else if (!dirty && dot) dot.remove();
+  }
+}
+
+/** 记住当前文件的视图状态（切换前调用） */
+function captureViewState(name) {
+  if (!cm || !name || !cm.state) return;
+  try {
+    viewStates.set(name, {
+      state: cm.state,
+      scrollTop: cm.scrollDOM ? cm.scrollDOM.scrollTop : 0
+    });
+  } catch (e) { console.warn('[tabs] capture failed', e); }
+  /* 只保留仍开着的标签的状态，避免关闭/淘汰后残留 */
+  const keep = tabList();
+  for (const k of Array.from(viewStates.keys())) if (keep.indexOf(k) < 0) viewStates.delete(k);
+}
+/** 还原视图状态；文档内容已变（外部改过 / 草稿合并 / 插件写入）时作废并返回 false */
+function restoreViewState(name, f) {
+  const vs = viewStates.get(name);
+  if (!vs || !vs.state) return false;
+  let same = false;
+  try { same = vs.state.doc.toString() === f.content; } catch (e) { same = false; }
+  if (!same) { viewStates.delete(name); return false; }
+  try {
+    cm.setState(vs.state);
+    /* setState 会带回保存时的 facet 值；字号 / 缩进 / 插件扩展是全局的，按当前值重配一次 */
+    try { PCCM.setFontSize(cm, fontSize); } catch (e) {}
+    try { PCCM.setTabSize(cm, tabSize); } catch (e) {}
+    try { if (PCCM.setPluginExtensions) PCCM.setPluginExtensions(cm, cm.__pcPluginExts || []); } catch (e) {}
+    curHlLang = hlLangOf(name);
+    const top = vs.scrollTop || 0;
+    requestAnimationFrame(() => { try { cm.scrollDOM.scrollTop = top; } catch (e) {} });
+    return true;
+  } catch (e) {
+    console.warn('[tabs] restore failed', e);
+    viewStates.delete(name);
+    return false;
+  }
+}
+
+/** 渲染标签栏（显示 basename，完整路径在 title 里） */
+function renderTabs() {
+  const box = $('tabs');
+  if (!box) return;
+  box.innerHTML = '';
+  for (const name of tabList()) {
+    const f = state.files.find(x => x.name === name);
+    if (!f) continue;
+    const tab = document.createElement('div');
+    tab.className = 'tab' + (name === state.active ? ' active' : '');
+    tab.title = name;
+    const lang = langOf(name);
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('viewBox', '0 0 24 24'); svg.setAttribute('width', '14'); svg.setAttribute('height', '14');
+    svg.innerHTML = '<path fill="currentColor" d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6z"/>';
+    svg.style.color = lang === 'python' ? '#4B8BBE' : lang === 'cpp' ? '#7aa2f7' : '#888';
+    const span = document.createElement('span');
+    span.className = 'fname';
+    span.textContent = name.split('/').pop();
+    tab.appendChild(svg);
+    /* 未保存指示：与保存逻辑同一判据（惰性文件 content 为 null 不算脏） */
+    if (f.content !== null && f._saved !== undefined && f._saved !== null && f.content !== f._saved) {
+      const dot = document.createElement('span'); dot.className = 'dot-dirty'; dot.title = t('tab_dirty');
+      tab.appendChild(dot);
+    }
+    tab.appendChild(span);
+    const x = document.createElement('button');
+    x.className = 'tab-x'; x.textContent = '×'; x.title = t('close');
+    x.addEventListener('click', (e) => { e.stopPropagation(); closeTab(name); });
+    tab.appendChild(x);
+    tab.addEventListener('click', () => { if (name !== state.active) openFile(name); });
+    box.appendChild(tab);
+  }
+  const act = box.querySelector('.tab.active');
+  if (act && act.scrollIntoView) { try { act.scrollIntoView({ block: 'nearest', inline: 'nearest' }); } catch (e) {} }
+}
+
+/** 关闭标签：只关视图，不删文件；至少保留一个（否则编辑器没有活动文档） */
+function closeTab(name) {
+  const tabs = tabList();
+  if (tabs.length <= 1) { outMeta(t('tab_keep_one')); return; }
+  const i = tabs.indexOf(name);
+  if (i < 0) return;
+  const wasActive = (name === state.active);
+  if (wasActive && cm) captureViewState(name);
+  dropTab(name);
+  if (wasActive) {
+    const next = tabs[Math.min(i, tabs.length - 1)];
+    openFile(next);
+  } else {
+    renderTabs();
+    saveStore();
+  }
+}
 
 function openFile(name) {
   const f = state.files.find(x => x.name === name);
   if (!f) return;
+  /* v5.6.0：惰性文件首次打开才读磁盘；读失败时不切换活动文件，避免把空内容当成文件内容写回去 */
+  if (f.content === null && !ensureContent(f)) {
+    outAppend('无法读取文件：' + name + '（可能已被移动、删除或超过 1MB）\n', 'out-err');
+    return;
+  }
+  const prev = state.active;
+  try { if (prev !== name) LS.bump(LS.uriOf(name)); } catch (e) {}   // v5.9.0：换文件即新版本
+  if (cm && prev && prev !== name) captureViewState(prev);
   state.active = name;
+  ensureTab(name);
   const lang = langOf(name);
   const hlLang = hlLangOf(name);
   if (typeof EditorAPI !== 'undefined' && EditorAPI) EditorAPI._ownLang = null;
-  if (cm && f.content !== cm.state.doc.toString()) PCCM.setDoc(cm, f.content, hlLang);
+  if (cm) {
+    const restored = (prev !== name) ? restoreViewState(name, f) : false;
+    /* v5.4.3 修复（审查 #9）：内容相同但语言不同时也必须重配语言包，
+       否则两个空文件互切（a.py ↔ b.cpp）会停留在上一个文件的高亮上，
+       而状态栏已显示新语言。 */
+    if (!restored && (f.content !== cm.state.doc.toString() || hlLang !== curHlLang)) {
+      viewStates.delete(name);            // 内容已变，旧视图状态作废
+      PCCM.setDoc(cm, f.content, hlLang);
+      curHlLang = hlLang;
+    }
+  }
   clearCodeErrors();
-  $('tab-name').textContent = name;
-  $('tab-fileicon').style.color = lang === 'python' ? '#4B8BBE' : lang === 'cpp' ? '#7aa2f7' : '#888';
+  renderTabs();
   $('welcome').classList.add('hidden');
-  $('status-lang').textContent = langLabel(lang);
-  $('status-engine').textContent = lang === 'python'
-    ? (pyEngine === 'online' ? '在线编译（真实编译）' : pyEngine === 'termux' ? 'Termux Python（原生 CPython）' : 'Pyodide (WebAssembly)')
-    : lang === 'cpp' ? (cppEngineName() + (resolveCppEngine(true) === 'termux' ? ' · 真实编译 · 可交互' : resolveCppEngine(true) === 'online' ? ' · 真实编译 · 在线' : ' · 教学级')) : '—';
+  updateEngineStatus();
   renderFileList();
   saveStore();
   pcEmit('fileOpen', { name: name, lang: hlLang });
 }
+/** v5.4.3：状态栏的语言/引擎文案单独抽出——probeTermux 只需刷新这一处，
+ *  不再走 openFile()（那会 clearCodeErrors 并把整个文件列表 + localStorage 重写一遍）。 */
+function updateEngineStatus() {
+  const lang = langOf(state.active);
+  $('status-lang').textContent = langLabel(lang);
+  $('status-engine').textContent = lang === 'python'
+    ? (pyEngine === 'online' ? '在线编译（真实编译）' : pyEngine === 'termux' ? 'Termux Python（原生 CPython）' : 'Pyodide (WebAssembly)')
+    : lang === 'cpp' ? (cppEngineName() + (resolveCppEngine(true) === 'termux' ? ' · 真实编译 · 可交互' : resolveCppEngine(true) === 'online' ? ' · 真实编译 · 在线' : ' · 教学级')) : '—';
+}
+/* v5.9.0：目录树（项目里带子目录时）——目录按需展开，未展开的子树不建 DOM */
+let treeOpen = new Set();
+try { treeOpen = new Set(JSON.parse(localStorage.getItem('pc_tree_open') || '[]')); } catch (e) { treeOpen = new Set(); }
+function saveTreeOpen() {
+  try { localStorage.setItem('pc_tree_open', JSON.stringify(Array.from(treeOpen))); } catch (e) {}
+}
+function fileIconSvg(name) {
+  const lang = langOf(name);
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('viewBox', '0 0 24 24'); svg.setAttribute('width', '15'); svg.setAttribute('height', '15');
+  svg.innerHTML = '<path fill="currentColor" d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6z"/>';
+  svg.style.color = lang === 'python' ? '#4B8BBE' : lang === 'cpp' ? '#7aa2f7' : '#888';
+  return svg;
+}
+function fileRow(f, depth) {
+  const li = document.createElement('li');
+  if (f.name === state.active) li.className = 'active';
+  if (projectMode()) li.classList.add('project-mode');
+  if (depth) li.style.paddingLeft = (12 + depth * 14) + 'px';
+  const span = document.createElement('span');
+  span.className = 'fname'; span.textContent = f.name.split('/').pop();
+  li.title = f.name;
+  li.appendChild(fileIconSvg(f.name)); li.appendChild(span);
+  li.addEventListener('click', () => { openFile(f.name); closeSidebar(); });
+  li.addEventListener('dblclick', () => startRename(f.name));
+  return li;
+}
 function renderFileList() {
   const ul = $('file-list');
   ul.innerHTML = '';
+  const withDirs = state.files.some(f => f.name.indexOf('/') >= 0);
+  if (!withDirs) { state.files.forEach(f => ul.appendChild(fileRow(f, 0))); return; }
+
+  const root = { dirs: new Map(), files: [] };
   for (const f of state.files) {
-    const li = document.createElement('li');
-    if (f.name === state.active) li.className = 'active';
-    if (projectMode()) li.classList.add('project-mode');
-    const lang = langOf(f.name);
-    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-    svg.setAttribute('viewBox', '0 0 24 24'); svg.setAttribute('width', '15'); svg.setAttribute('height', '15');
-    svg.innerHTML = '<path fill="currentColor" d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6z"/>';
-    svg.style.color = lang === 'python' ? '#4B8BBE' : lang === 'cpp' ? '#7aa2f7' : '#888';
-    const span = document.createElement('span');
-    span.className = 'fname'; span.textContent = f.name;
-    li.appendChild(svg); li.appendChild(span);
-    li.addEventListener('click', () => { openFile(f.name); closeSidebar(); });
-    li.addEventListener('dblclick', () => startRename(f.name));
-    ul.appendChild(li);
+    const parts = String(f.name).split('/');
+    let node = root;
+    for (let i = 0; i < parts.length - 1; i++) {
+      const d = parts[i];
+      if (!node.dirs.has(d)) node.dirs.set(d, { name: d, path: parts.slice(0, i + 1).join('/'), dirs: new Map(), files: [] });
+      node = node.dirs.get(d);
+    }
+    node.files.push(f);
   }
+  const renderNode = function (node, depth) {
+    node.dirs.forEach(function (sub) {
+      const li = document.createElement('li');
+      li.className = 'dir';
+      li.style.paddingLeft = (12 + depth * 14) + 'px';
+      /* 活动文件在折叠目录里时自动展开祖先，否则树上看不到当前文件 */
+      const activeInside = state.active && String(state.active).indexOf(sub.path + '/') === 0;
+      const open = treeOpen.has(sub.path) || activeInside;
+      const caret = document.createElement('span'); caret.className = 'dir-caret'; caret.textContent = open ? '▾' : '▸';
+      const name = document.createElement('span'); name.className = 'fname'; name.textContent = sub.name + '/';
+      li.appendChild(caret); li.appendChild(name);
+      li.addEventListener('click', function () {
+        if (treeOpen.has(sub.path)) treeOpen.delete(sub.path); else treeOpen.add(sub.path);
+        saveTreeOpen(); renderFileList();
+      });
+      ul.appendChild(li);
+      if (open) renderNode(sub, depth + 1);   // 懒加载：只渲染展开的子树
+    });
+    node.files.forEach(function (f) { ul.appendChild(fileRow(f, depth)); });
+  };
+  renderNode(root, 0);
 }
 
 /* ---------- Python ---------- */
@@ -572,7 +992,16 @@ function ensurePyWorker(opts) {
       }
       pyWorker = w;
       pyWorkerCtl = { resolve, climb, timeout: null };
-      pyWorkerCtl.timeout = setTimeout(() => resolve('timeout'), 90000);   // 90s 超时兜底
+      pyWorkerCtl.timeout = setTimeout(() => {
+        /* v5.4.3 修复（审查 #15）：超时后必须终止 Worker 并清空引用。
+           旧逻辑只 resolve('timeout')，Worker 仍在后台加载 —— 主线程回退模式会再加载
+           一份 Pyodide，内存里同时存在两份运行时；且「停止」分支只在 pyMode==='worker'
+           时 terminate，旧 Worker 永远杀不掉。 */
+        if (pyWorkerCtl) { clearTimeout(pyWorkerCtl.timeout); clearInterval(pyWorkerCtl.climb); pyWorkerCtl = null; }
+        try { if (pyWorker) pyWorker.terminate(); } catch (e) {}
+        pyWorker = null; pyWorkerOk = false; pyWorkerLoadPromise = null; pyInputWait = false;
+        resolve('timeout');
+      }, 90000);   // 90s 超时兜底
       w.onmessage = onPyWorkerMessage;
       w.onerror = (e) => {
         // module 加载失败等致命错误（走 load-error 之外的通知路径）
@@ -659,8 +1088,120 @@ let pySplashProg = null;   // 启动页进度回调（splash 阶段由 ensurePyW
 /* v5.1 代码智能：在主线程 / Worker 两种模式下求值 Python 脚本，返回字符串（失败返回 null） */
 let pyEvalSeq = 0;
 const pyEvalWaiters = Object.create(null);
+/* ============================================================
+ * v5.9.0 LanguageService
+ * 统一异步协议：diagnostics / completion / definition / references / documentSymbol
+ * · 每个请求带 documentUri + documentVersion + requestId
+ * · 文档版本在请求返回后已变化（或请求被取消）→ 结果标记 stale，调用方直接丢弃
+ * · 提供者由插件注册（Python 走 Pyodide，C++ 走现有启发式作为降级后端）
+ * ============================================================ */
+const LS = {
+  seq: 0,
+  providers: new Map(),   // lang -> provider
+  versions: new Map(),    // uri -> number
+  inflight: new Map(),    // requestId -> { kind, uri, version, cancelled }
+  uriOf(name) { return 'file:///' + encodeURI(String(name == null ? state.active : name) || ''); },
+  version(uri) { return this.versions.get(uri) || 0; },
+  bump(uri) {
+    const v = this.version(uri) + 1;
+    this.versions.set(uri, v);
+    return v;
+  },
+  register(lang, provider) {
+    if (!lang || !provider) return false;
+    this.providers.set(String(lang).toLowerCase(), provider);
+    return true;
+  },
+  unregister(lang) { this.providers.delete(String(lang).toLowerCase()); },
+  providerFor(lang) { return this.providers.get(String(lang || '').toLowerCase()) || null; },
+  cancel(requestId) {
+    const rec = this.inflight.get(requestId);
+    if (rec) { rec.cancelled = true; return true; }
+    return false;
+  },
+  /** 发起请求；返回 { ok, data, error, stale, requestId, documentUri, documentVersion } */
+  async request(kind, lang, params) {
+    const p = Object.assign({}, params || {});
+    const uri = p.uri || p.documentUri || LS.uriOf();
+    const version = LS.version(uri);
+    const id = 'ls' + (++LS.seq);
+    const rec = { id, kind, uri, version, cancelled: false };
+    LS.inflight.set(id, rec);
+    const provider = LS.providerFor(lang || p.lang || '');
+    const base = { requestId: id, documentUri: uri, documentVersion: version };
+    if (!provider || typeof provider[kind] !== 'function') {
+      LS.inflight.delete(id);
+      return Object.assign({ ok: false, error: 'no-provider:' + kind }, base);
+    }
+    try {
+      const data = await provider[kind](Object.assign({ documentUri: uri, documentVersion: version, requestId: id }, p));
+      const stale = rec.cancelled || LS.version(uri) !== version;
+      return Object.assign({ ok: true, data: data, stale: stale }, base);
+    } catch (e) {
+      return Object.assign({ ok: false, error: String((e && e.message) || e), stale: rec.cancelled }, base);
+    } finally {
+      LS.inflight.delete(id);
+    }
+  }
+};
+
+/* 独立的分析用 Pyodide 实例：单独开一个 py-worker，避免与用户程序共用全局状态。
+   只在校验请求到来时惰性启动；启动失败一次就不再重试，回退到用户运行时。 */
+const LsHost = {
+  worker: null, ready: false, loading: null, seq: 0, waiters: new Map(), disabled: false,
+  ensure() {
+    if (this.ready) return Promise.resolve(true);
+    if (this.disabled) return Promise.resolve(false);
+    if (this.loading) return this.loading;
+    this.loading = new Promise((resolve) => {
+      let w;
+      try { w = new Worker('py-worker.js'); } catch (e) { this.disabled = true; resolve(false); return; }
+      this.worker = w;
+      const done = (ok) => { clearTimeout(to); if (!ok) this.disabled = true; resolve(ok); };
+      const to = setTimeout(() => done(false), 90000);
+      w.onmessage = (e) => {
+        const d = e.data || {};
+        if (d.type === 'ready') { this.ready = true; done(true); return; }
+        if (d.type === 'load-error') { done(false); return; }
+        if (d.type === 'eval-result') {
+          const cb = this.waiters.get(d.id);
+          if (cb) { this.waiters.delete(d.id); cb(d); }
+        }
+      };
+      w.onerror = () => done(false);
+      try { w.postMessage({ type: 'init', bases: PY_BASES }); } catch (e) { done(false); }
+    });
+    return this.loading;
+  },
+  /** 返回字符串结果；失败返回 null */
+  eval(code, timeoutMs) {
+    if (!this.ready || !this.worker) return Promise.resolve(null);
+    const id = 'lse' + (++this.seq);
+    return new Promise((resolve) => {
+      this.waiters.set(id, (d) => resolve(d && d.ok ? String(d.value == null ? '' : d.value) : null));
+      setTimeout(() => { if (this.waiters.has(id)) { this.waiters.delete(id); resolve(null); } }, timeoutMs || 20000);
+      try { this.worker.postMessage({ type: 'eval', id: id, code: code }); }
+      catch (e) { this.waiters.delete(id); resolve(null); }
+    });
+  },
+  reset() {
+    try { this.worker && this.worker.terminate(); } catch (e) {}
+    this.worker = null; this.ready = false; this.loading = null; this.waiters.clear();
+  }
+};
+/** 设置项：分析是否使用独立实例（默认开） */
+function lsDedicated() { return localStorage.getItem('pc_ls_dedicated') !== 'off'; }
+
 async function pyEval(code) {
   try {
+    /* v5.9.0：代码分析优先使用独立实例，避免污染用户程序的全局状态 */
+    if (lsDedicated() && !LsHost.disabled) {
+      const ok = await LsHost.ensure();
+      if (ok) {
+        const r = await LsHost.eval(code);
+        if (r != null) return r;
+      }
+    }
     if (pyMode === 'worker') {
       if (!(pyWorker && pyWorkerOk)) { const ok = await ensurePyodide(); if (!ok) return null; }
       if (!(pyWorker && pyWorkerOk)) return null;
@@ -735,6 +1276,7 @@ async function ensurePyodideMain(opts) {
       pyodide.setStdout({ batched: (s) => outAppend(s + '\n') });
       pyodide.setStderr({ batched: (s) => outAppend(s + '\n', 'out-err') });
       patchPyodideInput(pyodide);   // v4.9.4：input("提示") 的提示语进对话框
+      ensurePyInterrupt(pyodide);   // v5.9.0：主线程模式也能中断（把 2 写进 SAB 触发 KeyboardInterrupt）
       setPyState('ready');
       const secs = ((performance.now() - t0) / 1000).toFixed(1);
       if (runningKind !== 'python') outMeta(t('py_preloaded') + ' · ' + secs + 's'
@@ -760,9 +1302,27 @@ async function runPython() {
       : null;
     pyOutCount = 0;
     const r = await new Promise((resolve) => {
-      pyRunDone = resolve;
+      let settled = false;
+      let guard = null;
+      const settle = (val) => {
+        if (settled) return;
+        settled = true;
+        if (guard) clearTimeout(guard);
+        if (pyRunDone === settle) pyRunDone = null;
+        resolve(val);
+      };
+      /* v5.4.3 修复（审查 #20）：Worker 崩溃（OOM 等）不会发 done/error，
+         旧逻辑会让 pyRunDone 永挂 —— 界面一直显示「运行中」，只能手动点停止。
+         这里加 10 分钟兜底：超时即终止 Worker 并报告失败。 */
+      guard = setTimeout(() => {
+        try { if (pyWorker) pyWorker.terminate(); } catch (e) {}
+        pyWorker = null; pyWorkerOk = false; pyWorkerLoadPromise = null; pyInputWait = false;
+        pyTermInputReset();
+        settle({ error: 'Python Worker 长时间无响应（可能已崩溃），已强制终止。请重新运行。' });
+      }, 600000);
+      pyRunDone = settle;
       try { pyWorker.postMessage({ type: 'run', code: cm.state.doc.toString(), files }); }
-      catch (e) { pyRunDone = null; resolve({ error: String((e && e.message) || e) }); }
+      catch (e) { settle({ error: String((e && e.message) || e) }); }
     });
     if (r && r.error) {
       outAppend(r.error + '\n', 'out-err');
@@ -792,58 +1352,121 @@ async function runPython() {
 }
 
 /* ---------- C++ · Termux 交互式（FIFO + 流式输出） ---------- */
+/** v5.10.0：解析本次要运行的入口与其内容（.qingcode.json 的 entry 优先） */
+function resolveRunTarget(wantLang) {
+  const entry = ProjectConfig.entryFor(state.active);
+  let f = state.files.find(x => x.name === entry);
+  if (!f) f = state.files.find(x => x.name === state.active);
+  if (!f) return null;
+  if (wantLang && langOf(f.name) !== wantLang) return null;
+  if (f.content === null && !ensureContent(f)) return null;
+  return f;
+}
+/** 组装交给原生的项目配置（只在 C++ 通道有意义，但字段通用） */
+function runOptsFor(target) {
+  const cfg = ProjectConfig.get();
+  return {
+    sources: ProjectConfig.extraSources(target.name),
+    includeDirs: cfg.includeDirs,
+    compiler: cfg.compiler || '',
+    standard: cfg.standard,
+    flags: cfg.flags,
+    args: cfg.args,
+    env: cfg.env,
+    cwd: cfg.cwd,
+    cacheMaxMB: cfg.cacheMaxMB,
+    cacheMaxEntries: cfg.cacheMaxEntries
+  };
+}
 function runCppTermux() {
   if (!guardTermux()) return;   // v4.9：未装 Termux 时取消所有 Termux 编译项目
+  const target = resolveRunTarget('cpp');
+  if (!target) { outAppend('找不到可运行的 C++ 文件。\n', 'out-err'); return; }
+  const cfg = ProjectConfig.get();
+  ProjectConfig.report();
+  const cxx = cfg.compiler || cppCompiler;
+  const sources = ProjectConfig.extraSources(target.name);
+  if (cfg.entry && cfg.entry !== state.active) outMeta(t('qc_using_entry').replace('{f}', cfg.entry));
   cppRunning = true;
   document.body.classList.add('term-live');
   if (Android.appendLog) Android.appendLog('js', 'runCppTermux engine=' + cppEngine
-      + ' termuxEnv=' + JSON.stringify(termuxEnv) + ' compiler=' + cppCompiler);
-  outAppend('$ ' + cppCompiler + ' ' + state.active + ' && 运行   [Termux 真实编译 · 可交互]\n', 'out-echo');
+      + ' compiler=' + cxx + ' entry=' + target.name + ' sources=' + sources.length);
+  outAppend('$ ' + cxx + ' -std=' + cfg.standard + ' ' + target.name
+      + (sources.length ? ' (+' + sources.length + ' 个源文件)' : '') + ' && 运行   [Termux 真实编译 · 可交互]\n', 'out-echo');
   outMeta('已发送编译请求到 Termux，等待响应…（首次编译约 10~30 秒）');
   // v4.9.3 运行会话目录：每次运行独立子目录，多项目连续运行（Termux 队列异步）不再互相覆盖文件与输出
   let sess = '';
   try { sess = (Android.beginRunSession ? (Android.beginRunSession() || '') : ''); } catch (e) {}
   window.__runSession = sess;
-  injectProjectHeadersToTermux(sess);
+  RunSession.begin('cpp', sess);
+  RunSession.set('preparing');
+  const staged = stageProjectForTermux(sess, 'cpp');   // v5.10.0：保留相对目录结构
+  if (staged) outMeta(t('run_staged').replace('{n}', staged));
+  RunSession.set('building');
   window.__cppT0 = performance.now();
   if (cppBeatTimer) clearInterval(cppBeatTimer);
   cppBeatTimer = setInterval(() => {
     if (!cppRunning) { clearInterval(cppBeatTimer); cppBeatTimer = null; return; }
-    outMeta('… Termux 处理中 ' + Math.round((performance.now() - window.__cppT0) / 1000) + 's（60s 超时后会给出诊断）');
+    outMeta('… Termux 处理中 ' + Math.round((performance.now() - window.__cppT0) / 1000) + 's（' + cfg.timeoutSec + 's 超时后会给出诊断）');
   }, 10000);
   try {
-    const ok = Android.runCpp(sess, state.active, cm.state.doc.toString(), cppCompiler, 60);
+    const opts = JSON.stringify(runOptsFor(target));
+    const ok = Android.runCppEx
+      ? Android.runCppEx(sess, target.name, target.content, opts, cfg.timeoutSec, cxx)
+      : Android.runCpp(sess, target.name, target.content, cxx, cfg.timeoutSec);
     if (!ok) { finishCpp(); outAppend('Termux 启动失败，请检查配置指引。\n', 'out-err'); }
   } catch (e) {
     finishCpp();
     outAppend('Termux 调用异常: ' + (e.message || e) + '\n', 'out-err');
   }
 }
-/* ---------- v4.7：Termux 原生 Python 解释器（与 C++ 通道共用 FIFO 交互与轮询；配置完全分离） ---------- */
-/** 项目模式下把所有 .py 平铺写入运行会话目录 → Termux python 的 sys.path 覆盖 → 同目录 import 可用 */
-function injectProjectPyToTermux(sess) {
-  if (!projectMode() || !window.Android || !Android.saveFile) return;
-  for (const f of state.files) {
-    if (!f.name.endsWith('.py')) continue;
-    try {
-      if (sess && Android.saveFileIn) Android.saveFileIn(sess, f.name.split('/').pop(), f.content);
-      else Android.saveFile(f.name.split('/').pop(), f.content);
-    } catch (e) {}
+/* v5.10.0：编译 / 运行分离——用上次的产物重跑，不再调用编译器 */
+function rerunCached() {
+  if (running) { outMeta('正在运行，请先停止。'); return; }
+  if (!(window.Android && Android.runCachedBinary)) { outAppend('当前环境不支持「重跑（不重新编译）」。\n', 'out-err'); return; }
+  if (!guardTermux()) return;
+  const target = resolveRunTarget('cpp');
+  if (!target) { outAppend('找不到可运行的 C++ 文件。\n', 'out-err'); return; }
+  const cfg = ProjectConfig.get();
+  cppRunning = true;
+  document.body.classList.add('term-live');
+  outAppend('$ ./重新运行（跳过编译）' + (cfg.args.length ? ' ' + cfg.args.join(' ') : '') + '\n', 'out-echo');
+  let sess = '';
+  try { sess = (Android.beginRunSession ? (Android.beginRunSession() || '') : ''); } catch (e) {}
+  window.__runSession = sess;
+  RunSession.begin('cpp-rerun', sess);
+  RunSession.set('preparing');
+  stageProjectForTermux(sess, 'cpp');
+  RunSession.set('running');
+  window.__cppT0 = performance.now();
+  try {
+    const ok = Android.runCachedBinary(sess, cfg.timeoutSec);
+    if (!ok) { finishCpp(); outAppend('重跑启动失败。\n', 'out-err'); }
+  } catch (e) {
+    finishCpp();
+    outAppend('重跑异常: ' + (e.message || e) + '\n', 'out-err');
   }
 }
+/* ---------- v4.7：Termux 原生 Python 解释器（与 C++ 通道共用 FIFO 交互与轮询；配置完全分离） ---------- */
 function runPythonTermux() {
   if (!guardTermux()) return;   // v4.9：未装 Termux 时取消所有 Termux 编译项目
+  const target = resolveRunTarget('python');
+  if (!target) { outAppend('找不到可运行的 Python 文件。\n', 'out-err'); return; }
   cppRunning = true;
   document.body.classList.add('term-live');
   window.__pyTermuxRun = true;
-  if (Android.appendLog) Android.appendLog('js', 'runPythonTermux termuxEnv=' + JSON.stringify(termuxEnv));
-  outAppend('$ python ' + state.active + '   [Termux 原生解释器 · 可交互]\n', 'out-echo');
+  if (Android.appendLog) Android.appendLog('js', 'runPythonTermux entry=' + target.name);
+  outAppend('$ python ' + target.name + '   [Termux 原生解释器 · 可交互]\n', 'out-echo');
   outMeta('已发送运行请求到 Termux…（未装 Python 时首次运行会自动 pkg install python，约 1~3 分钟）');
   // v4.9.3 运行会话目录（与 C++ 同机制）：项目 .py 与产物按会话隔离
   let sess = '';
   try { sess = (Android.beginRunSession ? (Android.beginRunSession() || '') : ''); } catch (e) {}
   window.__runSession = sess;
-  if (projectMode()) injectProjectPyToTermux(sess);
+  RunSession.begin('py-termux', sess);
+  RunSession.set('preparing');
+  const staged = projectMode() ? stageProjectForTermux(sess, 'py') : 0;   // v5.10.0：保留包目录结构
+  if (staged) outMeta(t('run_staged').replace('{n}', staged));
+  RunSession.set('running');
   window.__cppT0 = performance.now();
   if (cppBeatTimer) clearInterval(cppBeatTimer);
   cppBeatTimer = setInterval(() => {
@@ -851,7 +1474,7 @@ function runPythonTermux() {
     outMeta('… Termux 处理中 ' + Math.round((performance.now() - window.__cppT0) / 1000) + 's（可点「停止」终止）');
   }, 10000);
   try {
-    const ok = Android.runPyTermux(sess, state.active, cm.state.doc.toString(), 60);
+    const ok = Android.runPyTermux(sess, target.name, target.content, ProjectConfig.get().timeoutSec);
     if (!ok) { finishCpp(); outAppend('Termux 启动失败，请检查 Termux 是否已安装并完成授权。\n', 'out-err'); }
   } catch (e) {
     finishCpp();
@@ -908,6 +1531,7 @@ async function runPythonOnline() {
 
 function finishCpp() {
   cppRunning = false;
+  try { RunSession.end(); } catch (e) {}   // v5.10.0：会话进入 terminal 并清空
   window.__pyTermuxRun = false;
   // v4.9.3：结束运行会话（pollTask 已停，目录保留至下次启动由 cleanSwapTemp 统一清理）
   if (window.Android && Android.endRunSession) { try { Android.endRunSession(); } catch (e) {} }
@@ -922,6 +1546,7 @@ function clearCodeErrors() {
   currentErrs = [];
   if (cm && PCCM.clearErrors) { try { PCCM.clearErrors(cm); } catch (e) {} }
   hideErrBubble();
+  try { if (typeof setPanelProblems === 'function') setPanelProblems([]); } catch (e) {}   // v5.9.0
 }
 
 /** 解析 GCC/Clang 错误输出 → [{line, col, message}]（最多 6 处） */
@@ -1055,15 +1680,24 @@ function clearErrorsTouchedBy(up) {
   }
 }
 
-window.__onCppStream = function (text) {
+window.__onCppStream = function (text, sid) {
+  /* v5.10.0：带 sessionId 的事件——上一轮会话迟到的输出不再混进本次运行 */
+  if (sid && !RunSession.isCurrent(sid)) return;
+  if (RunSession.state === 'building' || RunSession.state === 'preparing') RunSession.set('running');
   if (text) outAppend(text);
 };
-window.__onCppStreamErr = function (text) {
+window.__onCppStreamErr = function (text, sid) {
+  if (sid && !RunSession.isCurrent(sid)) return;
   if (text) outAppend(text, 'out-err');
 };
 window.__onCppResult = function (res) {
   res = res || {};
   if (Android.appendLog) Android.appendLog('js', 'onCppResult ' + JSON.stringify(res).slice(0, 300));
+  /* v5.10.0：丢弃过期会话的结果（例如上一轮超时后 Termux 队列里迟到的收尾事件） */
+  if (res.sid && !RunSession.isCurrent(res.sid)) {
+    if (Android.appendLog) Android.appendLog('js', 'drop stale session result ' + res.sid);
+    return;
+  }
   const wasPyTermux = !!window.__pyTermuxRun;   // v4.9.4：先取快照（finishCpp 会清掉该标记，旧代码永远读不到）
   finishCpp();
   const elapsed = ((performance.now() - (window.__cppT0 || performance.now())) / 1000).toFixed(2);
@@ -1153,12 +1787,172 @@ function setRunning(v, kind) {
   runningKind = v ? kind : null;
   const btn = $('btn-run');
   btn.classList.toggle('running', v);
-  btn.querySelector('span').textContent = v ? '停止' : '运行';
+  /* v5.4.3：按钮文案走 i18n（此前硬编码中文，英文界面下运行一次就变回中文） */
+  btn.querySelector('span').textContent = v ? t('t_stop') : t('run');
 }
+/* ============================================================
+ * v5.10.0：项目配置 `.qingcode.json` + 运行会话状态机
+ * ============================================================ */
+const PROJECT_CONFIG_FILE = '.qingcode.json';
+/** 项目配置：只做解析 + 校验，不执行任何东西；解析失败一律回落到默认值并报告原因 */
+const ProjectConfig = {
+  _cacheKey: null, _cfg: null, _errs: [],
+  defaults() {
+    return {
+      entry: null, sources: [], includeDirs: [], compiler: null, standard: 'c++17',
+      flags: [], args: [], env: {}, cwd: null, timeoutSec: 60,
+      cacheMaxMB: 256, cacheMaxEntries: 40
+    };
+  },
+  /** 取配置文件原文（惰性文件先读盘）；没有配置文件返回 null */
+  source() {
+    const f = state.files.find(x => x.name === PROJECT_CONFIG_FILE);
+    if (!f) return null;
+    if (f.content === null && !ensureContent(f)) return null;
+    return f.content == null ? '' : String(f.content);
+  },
+  parse(text) {
+    const cfg = this.defaults(), errs = [];
+    let obj;
+    try { obj = JSON.parse(text); }
+    catch (e) { errs.push(t('qc_bad_json').replace('{m}', (e && e.message) || e)); return { ok: false, cfg: cfg, errs: errs }; }
+    if (!obj || typeof obj !== 'object' || Array.isArray(obj)) { errs.push(t('qc_bad_root')); return { ok: false, cfg: cfg, errs: errs }; }
+    const names = new Set(state.files.map(f => f.name));
+    const strList = function (v, field) {
+      if (v == null) return [];
+      if (!Array.isArray(v)) { errs.push(t('qc_bad_field').replace('{f}', field)); return []; }
+      const out = [];
+      for (const x of v) {
+        if (typeof x !== 'string' || !x.trim()) { errs.push(t('qc_bad_field').replace('{f}', field)); continue; }
+        out.push(x.trim());
+      }
+      return out;
+    };
+    if (obj.entry != null) {
+      if (typeof obj.entry !== 'string' || !obj.entry.trim()) errs.push(t('qc_bad_field').replace('{f}', 'entry'));
+      else if (!names.has(obj.entry.trim())) errs.push(t('qc_entry_missing').replace('{f}', obj.entry.trim()));
+      else cfg.entry = obj.entry.trim();
+    }
+    for (const s of strList(obj.sources, 'sources')) {
+      if (!names.has(s)) errs.push(t('qc_source_missing').replace('{f}', s));
+      else if (cfg.sources.indexOf(s) < 0) cfg.sources.push(s);
+    }
+    for (const d of strList(obj.includeDirs, 'includeDirs')) {
+      if (d.indexOf('..') >= 0 || d.charAt(0) === '/' || /^[A-Za-z]:/.test(d)) { errs.push(t('qc_bad_path').replace('{f}', d)); continue; }
+      cfg.includeDirs.push(d.replace(/\/+$/, ''));
+    }
+    if (obj.compiler != null) {
+      if (typeof obj.compiler !== 'string' || !/^[A-Za-z0-9_.+\/-]+$/.test(obj.compiler)) errs.push(t('qc_bad_field').replace('{f}', 'compiler'));
+      else cfg.compiler = obj.compiler.trim();
+    }
+    if (obj.standard != null) {
+      if (typeof obj.standard !== 'string' || !/^[cg]\+\+[0-9]{2}$/.test(obj.standard)) errs.push(t('qc_bad_field').replace('{f}', 'standard'));
+      else cfg.standard = obj.standard;
+    }
+    cfg.flags = strList(obj.flags, 'flags');
+    cfg.args = strList(obj.args, 'args');
+    if (obj.env != null) {
+      if (typeof obj.env !== 'object' || Array.isArray(obj.env)) errs.push(t('qc_bad_field').replace('{f}', 'env'));
+      else for (const k of Object.keys(obj.env)) {
+        if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) { errs.push(t('qc_bad_field').replace('{f}', 'env.' + k)); continue; }
+        const v = obj.env[k];
+        if (typeof v !== 'string' && typeof v !== 'number' && typeof v !== 'boolean') { errs.push(t('qc_bad_field').replace('{f}', 'env.' + k)); continue; }
+        cfg.env[k] = String(v);
+      }
+    }
+    if (obj.cwd != null) {
+      if (typeof obj.cwd !== 'string' || obj.cwd.indexOf('..') >= 0 || obj.cwd.charAt(0) === '/') errs.push(t('qc_bad_path').replace('{f}', 'cwd'));
+      else cfg.cwd = obj.cwd.replace(/\/+$/, '');
+    }
+    if (obj.timeoutSec != null) {
+      const n = Number(obj.timeoutSec);
+      if (!isFinite(n)) errs.push(t('qc_bad_field').replace('{f}', 'timeoutSec'));
+      else cfg.timeoutSec = Math.max(5, Math.min(600, Math.round(n)));
+    }
+    if (obj.cacheMaxMB != null) {
+      const n = Number(obj.cacheMaxMB);
+      if (isFinite(n) && n > 0) cfg.cacheMaxMB = Math.max(16, Math.min(4096, Math.round(n)));
+    }
+    if (obj.cacheMaxEntries != null) {
+      const n = Number(obj.cacheMaxEntries);
+      if (isFinite(n) && n > 0) cfg.cacheMaxEntries = Math.max(2, Math.min(500, Math.round(n)));
+    }
+    return { ok: errs.length === 0, cfg: cfg, errs: errs };
+  },
+  /** 带缓存：原文没变就不重复解析 */
+  get() {
+    const text = this.source();
+    if (text === null) { this._cacheKey = null; this._cfg = this.defaults(); this._errs = []; return this._cfg; }
+    if (this._cacheKey === text) return this._cfg;
+    const r = this.parse(text);
+    this._cacheKey = text; this._cfg = r.cfg; this._errs = r.errs;
+    return r.cfg;
+  },
+  errors() { this.get(); return this._errs; },
+  /** 本次运行使用的主文件：配置的 entry 优先，否则当前活动文件 */
+  entryFor(name) {
+    const cfg = this.get();
+    if (cfg.entry) return cfg.entry;
+    return name || state.active;
+  },
+  /** 除主文件外的额外源文件（去重、排除 entry 自身） */
+  extraSources(entry) {
+    const cfg = this.get();
+    return cfg.sources.filter(s => s !== entry);
+  },
+  report() {
+    const errs = this.errors();
+    if (!errs.length) return;
+    for (const e of errs) outAppend('⚠ .qingcode.json: ' + e + '\n', 'out-err');
+    outMeta(t('qc_fallback'));
+  }
+};
+
+/** 运行会话状态机：queued → preparing → building → running ⇄ waitingInput → stopping → terminal */
+const RUN_STATES = ['queued', 'preparing', 'building', 'running', 'waitingInput', 'stopping', 'terminal'];
+const RunSession = {
+  seq: 0, id: null, sid: null, kind: '', state: 'idle', startedAt: 0, history: [],
+  begin(kind, sid) {
+    this.seq += 1;
+    this.id = 'rs' + this.seq;
+    this.sid = sid || this.id;     // 原生侧用会话目录名回传，故以它为准
+    this.kind = kind || '';
+    this.state = 'queued';
+    this.startedAt = performance.now();
+    this.history = [{ state: 'queued', at: 0 }];
+    RunSession._render();
+    return this.sid;
+  },
+  set(state) {
+    if (RUN_STATES.indexOf(state) < 0 || this.state === 'idle') return false;
+    if (this.state === state) return true;
+    this.state = state;
+    this.history.push({ state: state, at: Math.round(performance.now() - this.startedAt) });
+    RunSession._render();
+    return true;
+  },
+  /** 事件是否属于当前会话：没有 sid 的事件按「属于」处理（兼容旧原生实现） */
+  isCurrent(sid) { return !!this.sid && (!sid || sid === this.sid); },
+  end() {
+    if (this.state !== 'idle') this.state = 'terminal';
+    this.sid = null; this.state = 'idle'; this.kind = '';
+    RunSession._render();
+  },
+  _render() {
+    const el = $('status-run');
+    if (!el) return;
+    const map = { queued: 'run_queued', preparing: 'run_preparing', building: 'run_building', running: 'run_running', waitingInput: 'run_waiting', stopping: 'run_stopping', terminal: 'run_terminal' };
+    el.textContent = this.state === 'idle' ? '' : t(map[this.state] || 'run_running');
+    el.classList.toggle('hidden', this.state === 'idle');
+    el.dataset.state = this.state;
+  }
+};
+
 async function runCurrent() {
   if (running) {
     // 运行中点击 = 停止：按引擎立即终止，不再等超时
     if (runningKind === 'termux' || runningKind === 'py-termux') {
+      RunSession.set('stopping');   // v5.10.0
       if (window.Android && Android.cancelCpp) Android.cancelCpp();
       outAppend('⏹ KeyboardInterrupt: 已手动停止（Termux ' + (runningKind === 'py-termux' ? 'Python' : '编译/运行') + '进程已终止）\n', 'out-err');
       finishCpp();
@@ -1182,8 +1976,10 @@ async function runCurrent() {
         pyTermInputReset();
         if (pyRunDone) { const f = pyRunDone; pyRunDone = null; f({}); }
         outAppend('⏹ KeyboardInterrupt: 已强制终止（Python Worker 已停止，下次运行自动重启）\n', 'out-err');
+      } else if (interruptMainThreadPy()) {
+        outAppend('⏹ KeyboardInterrupt: 已向主线程 Python 发送中断请求…\n', 'out-err');
       } else {
-        outMeta('已停止（当前环境为主线程回退模式，无法强制中断运行中的程序；无限循环请改用在线引擎或 Termux）。');
+        outMeta('已停止（当前环境不提供中断缓冲，无法强制中断运行中的程序；无限循环请改用在线引擎或 Termux）。');
       }
       setRunning(false);
     }
@@ -1307,25 +2103,329 @@ const PC_INCLUDES = ['iostream', 'cmath', 'cstring', 'cstdio', 'cstdlib', 'ctime
 /* ---------- 项目空间（v4.0：本地文件夹作为工程，文件互相调用 + 定时自动保存） ---------- */
 function projectMode() { return !!projectRoot; }
 
+/* ============================================================
+ * v5.5.0 工作区持久化 + 未保存缓冲区（移动 IDE 改造 · 阶段 1 的一部分）
+ * - localStorage 只放工作区元数据（根路径 / 活动文件 / 每个文件的磁盘签名）；
+ * - 未保存内容放 IndexedDB（容量远大于 localStorage 的 5MB），保存成功后删除对应草稿；
+ * - 保存前比对磁盘签名（size:mtime），外部改过的文件不静默覆盖。
+ * 尚未覆盖：按需加载、多标签、每文件 EditorState、SAF（见后续阶段）。
+ * ============================================================ */
+const WS_KEY = 'pc_workspace';                  // v5.7.0 起只用于旧版数据迁移
+const DRAFT_DB = 'pc_ws', DRAFT_STORE = 'drafts', META_STORE = 'meta';
+const DraftStore = {
+  _dbP: null,
+  open() {
+    if (this._dbP) return this._dbP;
+    if (typeof indexedDB === 'undefined') { this._dbP = Promise.reject(new Error('no indexedDB')); return this._dbP; }
+    this._dbP = new Promise((res, rej) => {
+      /* v5.7.0：版本 2 新增 meta 存储（工作区元数据，localStorage 只留界面设置） */
+      const r = indexedDB.open(DRAFT_DB, 2);
+      r.onupgradeneeded = () => {
+        const db = r.result;
+        try { if (!db.objectStoreNames.contains(DRAFT_STORE)) db.createObjectStore(DRAFT_STORE); } catch (e) {}
+        try { if (!db.objectStoreNames.contains(META_STORE)) db.createObjectStore(META_STORE); } catch (e) {}
+      };
+      r.onsuccess = () => res(r.result);
+      r.onerror = () => { storeIssue(t('store_draft_fail')); rej(r.error); };
+    });
+    return this._dbP;
+  },
+  put(key, val) {
+    return this.open().then(db => new Promise((res, rej) => {
+      const tx = db.transaction(DRAFT_STORE, 'readwrite');
+      tx.objectStore(DRAFT_STORE).put(val, key);
+      tx.oncomplete = () => res(true); tx.onerror = () => rej(tx.error);
+    })).then(ok => { if (ok) storeOk(); return ok; })
+      .catch(() => { storeIssue(t('store_draft_fail')); return false; });
+  },
+  del(key) {
+    return this.open().then(db => new Promise((res, rej) => {
+      const tx = db.transaction(DRAFT_STORE, 'readwrite');
+      tx.objectStore(DRAFT_STORE).delete(key);
+      tx.oncomplete = () => res(true); tx.onerror = () => rej(tx.error);
+    })).catch(() => false);
+  },
+  /** 返回 [[key, content], ...]（单事务内同时取 keys/values，避免两次读取错位） */
+  all() {
+    return this.open().then(db => new Promise((res, rej) => {
+      const tx = db.transaction(DRAFT_STORE, 'readonly');
+      const st = tx.objectStore(DRAFT_STORE);
+      const kr = st.getAllKeys(), vr = st.getAll();
+      tx.oncomplete = () => res(kr.result.map((k, i) => [k, vr.result[i]]));
+      tx.onerror = () => rej(tx.error);
+    })).catch(() => []);
+  }
+};
+/** v5.7.0：工作区元数据（根路径 / 活动文件 / 标签 / 文件签名）存 IndexedDB */
+const WsMeta = {
+  get() {
+    return DraftStore.open().then(db => new Promise((res, rej) => {
+      const q = db.transaction(META_STORE, 'readonly').objectStore(META_STORE).get('ws');
+      q.onsuccess = () => res(q.result || null);
+      q.onerror = () => rej(q.error);
+    })).catch(() => null);
+  },
+  put(val) {
+    return DraftStore.open().then(db => new Promise((res, rej) => {
+      const tx = db.transaction(META_STORE, 'readwrite');
+      tx.objectStore(META_STORE).put(val, 'ws');
+      tx.oncomplete = () => res(true); tx.onerror = () => rej(tx.error);
+    })).then(ok => { if (ok) storeOk(); return ok; })
+      .catch(() => { storeIssue(t('store_meta_fail')); return false; });
+  },
+  clear() {
+    return DraftStore.open().then(db => new Promise((res, rej) => {
+      const tx = db.transaction(META_STORE, 'readwrite');
+      tx.objectStore(META_STORE).delete('ws');
+      tx.oncomplete = () => res(true); tx.onerror = () => rej(tx.error);
+    })).catch(() => false);
+  }
+};
+function draftKey(rel) { return (projectRoot || '') + '\n' + rel; }
+
+/* ---------- v5.6.0 按需加载：惰性文件（content === null）在首次需要时才读磁盘 ---------- */
+/** 读项目内单个文件；失败返回 null（空文件返回 ""） */
+function loadProjectFile(rel) {
+  if (!(window.Android && Android.readProjectFile) || !projectRoot) return null;
+  try {
+    const r = Android.readProjectFile(projectRoot, rel);
+    return (r === null || r === undefined) ? null : String(r);
+  } catch (e) { return null; }
+}
+/** 确保文件内容已加载；成功返回 true。加载后把 _saved 对齐磁盘版本（不算脏）。 */
+function ensureContent(f) {
+  if (!f) return false;
+  if (f.content !== null) return true;
+  const txt = loadProjectFile(f.name);
+  if (txt === null) return false;
+  f.content = txt;
+  f._saved = txt;
+  f._lazy = false;
+  /* 读到的就是当前磁盘版本 → 刷新签名，这样「加载后被外部改过」才能被检测到 */
+  f._sig = sigOf(f.name) || f._sig;
+  return true;
+}
+/** 加载惰性文件（全局搜索 / 符号需要）。带内存预算：跳过会超出预算的大文件，返回本次加载数量。 */
+const ENSURE_ALL_BUDGET = 20 * 1024 * 1024;   // 20MB
+function ensureAllContent() {
+  let n = 0, bytes = 0;
+  for (const f of state.files) {
+    if (f.content !== null) continue;
+    const sz = f._size || 0;
+    if (bytes + sz > ENSURE_ALL_BUDGET) continue;   // 预算外的大文件不加载，避免整项目塞进内存
+    if (ensureContent(f)) { n++; bytes += sz; }
+  }
+  return n;
+}
+
+let pendingRestore = null;   // 启动恢复时暂存的工作区元数据，等 readProject 回调后应用
+let restoreMeta = null;      // v5.7.0：本次恢复所用的元数据（含上次关闭时的磁盘签名与标签）
+let draftTimer = null;
+let wsMetaTimer = null;
+let wsMetaStored = false;   // 是否真的写过元数据（避免默认空间每次 saveStore 都开事务去清）
+
+/** 工作区元数据（不含文件内容）：重启后据此恢复项目模式、标签与活动文件
+ *  v5.7.0：改存 IndexedDB（localStorage 只留界面设置），并合并写以减少事务次数 */
+function saveWorkspaceMeta() {
+  if (!projectRoot) {
+    if (wsMetaTimer) { clearTimeout(wsMetaTimer); wsMetaTimer = null; }
+    if (wsMetaStored) { wsMetaStored = false; WsMeta.clear(); }
+    return;
+  }
+  if (wsMetaTimer) clearTimeout(wsMetaTimer);
+  wsMetaTimer = setTimeout(flushWorkspaceMeta, 500);
+}
+function flushWorkspaceMeta() {
+  if (wsMetaTimer) { clearTimeout(wsMetaTimer); wsMetaTimer = null; }
+  if (!projectRoot) return;
+  wsMetaStored = true;
+  WsMeta.put({
+    v: 2,
+    root: projectRoot,
+    active: state.active || null,
+    tabs: (state.tabs || []).slice(),
+    files: state.files.map(f => ({ rel: f.name, sig: f._sig || null })),
+    savedAt: Date.now()
+  });
+}
+/** 旧版把元数据放在 localStorage：这里读出并迁移，随后由 restoreWorkspace 使用 */
+function takeLegacyWsMeta() {
+  let raw = null;
+  try { raw = localStorage.getItem(WS_KEY); } catch (e) { return null; }
+  if (!raw) return null;
+  try { localStorage.removeItem(WS_KEY); } catch (e) {}
+  try {
+    const o = JSON.parse(raw);
+    if (o && o.root) { WsMeta.put(o); return o; }
+  } catch (e) {}
+  return null;
+}
+
+/** 磁盘签名（size:mtime）；浏览器 / 无原生桥时返回 null（跳过冲突检测） */
+function sigOf(rel) {
+  if (!(window.Android && Android.statFile)) return null;
+  try {
+    const raw = Android.statFile(projectRoot + '/' + rel);
+    if (!raw) return null;
+    const o = JSON.parse(raw);
+    return (o && o.size != null && o.mtime != null) ? (o.size + ':' + o.mtime) : null;
+  } catch (e) { return null; }
+}
+
+/** 编辑后延迟落草稿（1.2s 合并高频输入） */
+function scheduleDraft() {
+  if (!projectMode()) return;
+  clearTimeout(draftTimer);
+  draftTimer = setTimeout(function () {
+    const f = state.files.find(x => x.name === state.active);
+    if (!f) return;
+    if (f._saved === f.content) DraftStore.del(draftKey(f.name));
+    else DraftStore.put(draftKey(f.name), String(f.content == null ? '' : f.content));
+  }, 1200);
+}
+
+/** 把草稿合并回刚读取的磁盘内容（保留 _saved 为磁盘版本 → 仍算脏，等待保存）
+ *  v5.7.0：同时比对上一次关闭时记录的磁盘签名——
+ *  · 期间被外部改过 → 保留草稿，但把 _sig 还原成「草稿所基于的版本」，
+ *    这样保存时既有的冲突检查会拒绝覆盖并报告，绝不静默盖掉对方的修改；
+ *  · 文件在磁盘上已删除 → 草稿无处可放，明确报告而不是悄悄丢弃。 */
+function applyDrafts() {
+  const metaSig = new Map();
+  if (restoreMeta && Array.isArray(restoreMeta.files)) {
+    for (const it of restoreMeta.files) if (it && it.rel) metaSig.set(it.rel, it.sig || null);
+  }
+  DraftStore.all().then(list => {
+    const prefix = projectRoot + '\n';
+    let n = 0;
+    const changed = [], orphans = [];
+    for (const pair of list) {
+      const k = pair[0], v = pair[1];
+      if (typeof k !== 'string' || k.indexOf(prefix) !== 0) continue;
+      const rel = k.slice(prefix.length);
+      const f = state.files.find(x => x.name === rel);
+      if (!f) { orphans.push(rel); continue; }
+      if (f.content === v) { DraftStore.del(k); continue; }
+      /* 草稿基于旧版本，而磁盘已经变了 → 记下旧签名，保存时走「不覆盖 + 报告」分支 */
+      const oldSig = metaSig.get(rel);
+      if (oldSig && f._sig && oldSig !== f._sig) { f._sig = oldSig; changed.push(rel); }
+      f.content = v;
+      viewStates.delete(rel);      // 内容已变，旧的视图状态作废（避免切回来还原出草稿前的文档）
+      n++;
+    }
+    outAppend('📁 ' + projectLabel() + '\n', 'out-echo');
+    if (state.active) openFile(state.active);   // 刷新编辑器为合并后的内容
+    if (n) outMeta(t('ws_restored').replace('{n}', state.files.length).replace('{m}', n));
+    else outMeta(t('ws_reopened').replace('{n}', state.files.length));
+    if (changed.length) {
+      outAppend('⚠ ' + t('ws_external_changed') + '\n' + changed.map(r => '  · ' + r).join('\n') + '\n', 'out-err');
+    }
+    if (orphans.length) {
+      outAppend('⚠ ' + t('ws_draft_orphan') + '\n' + orphans.map(r => '  · ' + r).join('\n') + '\n', 'out-err');
+      for (const rel of orphans) DraftStore.del(prefix + rel);
+    }
+    renderFileList();
+    renderTabs();
+  });
+}
+
+/** 启动时尝试恢复上次的工作区（目录仍可访问才恢复；失败则清掉元数据）
+ *  v5.7.0：元数据在 IndexedDB → 变成异步；同时接管旧版 localStorage 数据。 */
+async function restoreWorkspace() {
+  if (projectMode()) return;
+  if (!(window.Android && Android.readProject && Android.projectExists)) return;
+  let meta = null;
+  try { meta = await WsMeta.get(); } catch (e) { meta = null; }
+  if (!meta || !meta.root) meta = takeLegacyWsMeta();
+  if (!meta || !meta.root) return;
+  /* v5.10.0：SAF 工作区用 "saf:<id>" 令牌恢复；令牌能解析即说明授权仍在 */
+  const isSaf = String(meta.root).indexOf('saf:') === 0;
+  if (isSaf && Android.treeWorkspaceInfo) {
+    try {
+      const info = Android.treeWorkspaceInfo(String(meta.root));
+      if (info) projectDisplayName = JSON.parse(info).name || '';
+    } catch (e) {}
+  }
+  const label = isSaf ? (projectDisplayName || t('saf_workspace')) : meta.root;
+  let ok = false;
+  try { ok = Android.projectExists(meta.root); } catch (e) { ok = false; }
+  if (!ok) {
+    /* 授权失效 / 目录被删 / 存储不可访问：不再盲目重试，明确告知并清掉元数据 */
+    outAppend('⚠ ' + t('ws_lost') + label + '\n', 'out-err');
+    WsMeta.clear();
+    return;
+  }
+  pendingRestore = meta;
+  outMeta(t('ws_restoring') + label);
+  if (Android.readProjectMeta) Android.readProjectMeta(meta.root);
+  else Android.readProject(meta.root);
+}
+
+/* v5.6.0：超过任一阈值就走「按需加载」，小项目仍全量读取（保持原有行为与插件兼容） */
+const LAZY_MIN_FILES = 40;
+const LAZY_MIN_BYTES = 1.5 * 1024 * 1024;
+
 function onProjectLoaded(data) {
   if (!data || data.error) {
     outAppend('打开项目失败：' + (data && data.error || '未知错误') + '\n', 'out-err');
+    pendingRestore = null;
     return;
   }
+  /* 元数据回调：小项目回退到一次全量读取（pendingRestore 保留到那次回调消费） */
+  if (data.metaOnly) {
+    /* v5.10.0：SAF 工作区一律按需加载（原生没有「一次读全」的 SAF 版本，
+       直接走 readProject 会撞上绝对路径校验） */
+    if (data.saf) { buildProjectFiles(data, true); return; }
+    let total = 0;
+    for (const f of data.files) total += (f.size || 0);
+    if (data.files.length <= LAZY_MIN_FILES && total <= LAZY_MIN_BYTES) {
+      Android.readProject(data.path);
+      return;
+    }
+    buildProjectFiles(data, true);
+    return;
+  }
+  buildProjectFiles(data, false);
+}
+
+function buildProjectFiles(data, lazy) {
   projectRoot = data.path;
+  if (data.saf && data.name) projectDisplayName = data.name;   // v5.10.0：SAF 工作区显示名
   const files = [];
   for (const f of data.files) {
-    files.push({ name: f.rel, content: f.content, _saved: f.content });
+    /* 惰性模式下 content 为 null（未加载）；_saved 也置 null，避免被当成「已保存的空文件」写回磁盘 */
+    files.push({
+      name: f.rel,
+      content: lazy ? null : f.content,
+      _saved: lazy ? null : f.content,
+      _sig: (f.size != null && f.mtime != null) ? (f.size + ':' + f.mtime) : null,
+      _size: f.size != null ? f.size : null,
+      _lazy: !!lazy
+    });
   }
-  if (!files.length) files.push({ name: 'main.py', content: '', _saved: '' });
+  if (!files.length) files.push({ name: 'main.py', content: '', _saved: '', _lazy: false });
   state.files = files;
-  state.active = files[0].name;
+  const restoring = !!pendingRestore;
+  restoreMeta = restoring ? { files: pendingRestore.files || [], tabs: pendingRestore.tabs || [] } : null;
+  const wantActive = pendingRestore && pendingRestore.active;
+  state.active = (wantActive && files.some(f => f.name === wantActive)) ? wantActive : files[0].name;
+  /* v5.7.0：恢复上次的标签集合（只保留仍然存在的文件）；新开项目 / 换项目一律重置 */
+  viewStates.clear();
+  let tabs = restoring ? restoreMeta.tabs.filter(n => files.some(f => f.name === n)) : [];
+  if (tabs.indexOf(state.active) < 0) tabs.unshift(state.active);
+  state.tabs = tabs;
+  pendingRestore = null;
   saveStore();
   renderFileList();
   openFile(state.active);
-  outAppend('📁 项目已打开：' + projectRoot + '（' + files.length + ' 个文件）\n', 'out-echo');
-  outMeta('文件夹即项目空间：Python 可直接 import 项目内模块；每 30 秒自动保存到原位置。');
   syncProjectMenu();
+  if (restoring) applyDrafts();
+  else {
+    outAppend('📁 项目已打开：' + projectRoot + '（' + files.length + ' 个文件'
+      + (lazy ? '，按需加载' : '') + '）\n', 'out-echo');
+    outMeta(lazy
+      ? t('ws_lazy_hint').replace('{n}', files.length)
+      : '文件夹即项目空间：Python 可直接 import 项目内模块；每 30 秒自动保存到原位置。');
+  }
 }
 
 /* v4.11.2 修复：原生 readProject() 的回调名是 window.__onProjectLoaded，
@@ -1341,7 +2441,9 @@ function openProjectFolder() {
   outMeta('请在弹出的对话框中选择项目文件夹…');
   const path = Android.pickProjectFolder();
   if (!path) { outMeta('已取消。'); return; }
-  Android.readProject(path);
+  /* v5.6.0：先取元数据（快），再由 onProjectLoaded 决定全量还是按需 */
+  if (Android.readProjectMeta) Android.readProjectMeta(path);
+  else Android.readProject(path);
 }
 
 /** 打开单个本地文件（智能编码识别）加入当前文件列表 */
@@ -1373,12 +2475,22 @@ window.__onSingleFileLoaded = function (data) {
 }
 
 function closeProject() {
+  const oldRoot = projectRoot;
   projectRoot = null;
+  /* v5.5.0：主动关闭项目 → 丢弃该工作区的未保存草稿，避免下次恢复时又冒出来 */
+  if (oldRoot) {
+    const prefix = oldRoot + '\n';
+    DraftStore.all().then(list => {
+      for (const pair of list) if (typeof pair[0] === 'string' && pair[0].indexOf(prefix) === 0) DraftStore.del(pair[0]);
+    });
+  }
   state.files = [
-    { name: 'main.py', content: PY_DEFAULT_CODE },
-    { name: 'hello.cpp', content: CPP_DEFAULT_CODE }
+    { name: 'main.py', content: PY_DEFAULT_CODE, _saved: PY_DEFAULT_CODE },
+    { name: 'hello.cpp', content: CPP_DEFAULT_CODE, _saved: CPP_DEFAULT_CODE }
   ];
   state.active = 'main.py';
+  state.tabs = ['main.py'];     // v5.7.0：换空间 → 标签与视图状态一并重置
+  viewStates.clear();
   saveStore();
   renderFileList();
   openFile(state.active);
@@ -1394,6 +2506,7 @@ function injectProjectToPyodide() {
     if (!FS || !FS.analyzePath) return;
     for (const f of state.files) {
       if (!f.name.endsWith('.py')) continue;
+      if (f.content === null && !ensureContent(f)) continue;   // v5.6.0：运行需要内容，按需加载
       const full = '/home/pyodide/' + f.name;
       const dir = full.slice(0, full.lastIndexOf('/'));
       if (!FS.analyzePath(dir).exists) {
@@ -1407,16 +2520,29 @@ function injectProjectToPyodide() {
 }
 
 /** 项目内头文件写入 Termux 运行会话目录 → #include "xxx.h" 可用（v4.9.3：与会话同目录；无会话回退交换目录） */
-function injectProjectHeadersToTermux(sess) {
-  if (!projectMode() || !window.Android || !Android.saveFile) return;
+/* v5.10.0：运行暂存器——所有引擎共用，保留项目相对目录结构。
+   旧实现把文件平铺到会话根目录（只取 basename），于是 #include "sub/x.h"、
+   import 包内模块一类带目录的引用一律找不到。 */
+function writeSessionFile(sess, rel, content) {
+  try {
+    if (sess && Android.saveFileRel) return !!Android.saveFileRel(sess, rel, content);
+    /* 老版本原生没有 saveFileRel：退化为平铺（保持可用，不阻断运行） */
+    const base = String(rel).split('/').pop();
+    if (sess && Android.saveFileIn) return !!Android.saveFileIn(sess, base, content);
+    if (Android.writeSwapFile) return !!Android.writeSwapFile(base, content);
+  } catch (e) {}
+  return false;
+}
+function stageProjectForTermux(sess, kind) {
+  if (!projectMode() || !window.Android) return 0;
+  const want = kind === 'py' ? /\.py$/i : /\.(c|cc|cpp|cxx|h|hpp|hh|hxx|inc)$/i;
+  let n = 0;
   for (const f of state.files) {
-    if (/\.(h|hpp|hh)$/i.test(f.name)) {
-      try {
-        if (sess && Android.saveFileIn) Android.saveFileIn(sess, f.name.split('/').pop(), f.content);
-        else Android.saveFile(f.name.split('/').pop(), f.content);
-      } catch (e) {}
-    }
+    if (!want.test(f.name)) continue;
+    if (f.content === null && !ensureContent(f)) continue;   // v5.6.0：惰性文件先读盘
+    if (writeSessionFile(sess, f.name, f.content)) n++;
   }
+  return n;
 }
 
 /** 定时自动保存：把改动写回项目原位置（按编码） */
@@ -1424,24 +2550,71 @@ function autoSaveProject(manual) {
   if (!projectMode() || !window.Android || !Android.writeProjectFile) return;
   if (!autoSaveOn && !manual) return;
   let n = 0, fail = 0;
+  const conflicts = [];
   for (const f of state.files) {
     if (f._saved !== undefined && f._saved === f.content) continue;
-    const ok = Android.writeProjectFile(projectRoot + '/' + f.name, f.content, exportEncoding);
-    if (ok) { f._saved = f.content; n++; } else fail++;
+    if (f.content === null) continue;          // v5.6.0：未加载的惰性文件绝不写入
+    /* v5.5.0：保存前校验磁盘签名——文件在外部被改过就跳过，绝不静默覆盖 */
+    const cur = sigOf(f.name);
+    if (cur && f._sig && cur !== f._sig) { conflicts.push(f.name); continue; }
+    const full = projectRoot + '/' + f.name;
+    const ok = Android.writeProjectFile(full, f.content, exportEncoding);
+    if (ok) {
+      f._saved = f.content;
+      f._sig = sigOf(f.name) || f._sig;      // 写后刷新签名，后续比较以新版本为准
+      DraftStore.del(draftKey(f.name));      // 已落盘 → 草稿不再需要
+      n++;
+    } else fail++;
   }
   if (n || manual) {
     outMeta((manual ? '已手动保存 ' : '自动保存 ') + n + ' 个文件 → ' + projectRoot + '（' + exportEncoding + '）');
   }
-  if (fail) {
-    outAppend('⚠ 有 ' + fail + ' 个文件保存失败（常见原因：所选编码不支持文件内容，如 ASCII 含中文）。'
-      + '可在菜单切换编码（如 UTF-8 / GBK）后重试。\n', 'out-err');
+  if (conflicts.length) {
+    outAppend('⚠ ' + t('ws_conflict') + conflicts.join('、') + '\n' + t('ws_conflict_hint') + '\n', 'out-err');
   }
+  if (fail) {
+    let why = '';
+    try { why = (Android && Android.lastWriteError) ? String(Android.lastWriteError() || '') : ''; } catch (e) { why = ''; }
+    outAppend('⚠ 有 ' + fail + ' 个文件保存失败' + (why ? ('：' + why) : '') + '\n'
+      + (why ? '' : '（常见原因：所选编码不支持文件内容，如 ASCII 含中文；可在菜单切换编码后重试）\n'), 'out-err');
+  }
+  if (n) { renderTabs(); refreshActiveTabDirty(); }   // v5.7.0：保存后清掉标签上的未保存圆点
 }
 function startAutoSaveLoop() {
   clearInterval(projectSaveTimer);
   projectSaveTimer = setInterval(() => autoSaveProject(false), 30000);
 }
 
+/* ============================================================
+ * v5.10.0：SAF 工作区
+ * projectRoot 在 SAF 模式下是 "saf:<id>" 令牌；原生按令牌走 ContentResolver，
+ * 其余代码（读/写/签名/恢复）无需区分——所有写入都绑定在已授权的目录树上。
+ * ============================================================ */
+let projectDisplayName = '';
+function projectLabel() {
+  if (!projectMode()) return '';
+  return projectRoot.indexOf('saf:') === 0 ? (projectDisplayName || t('saf_workspace')) : projectRoot;
+}
+function openSafWorkspace() {
+  if (!(window.Android && Android.openTreeWorkspace)) {
+    outAppend('该功能仅在安卓应用内可用。\n', 'out-err');
+    return false;
+  }
+  outMeta(t('saf_picking'));
+  try { return !!Android.openTreeWorkspace(); }
+  catch (e) { outAppend('打开目录选择器失败：' + (e.message || e) + '\n', 'out-err'); return false; }
+}
+/** 系统目录选择器回调 */
+window.__onTreeWorkspace = function (info) {
+  if (!info || info.cancelled) { outMeta(t('saf_cancelled')); return; }
+  if (!info.id) { outAppend('未取得工作区标识。\n', 'out-err'); return; }
+  const token = 'saf:' + info.id;
+  projectDisplayName = info.name || '';
+  outMeta(t('saf_opened').replace('{n}', projectDisplayName || info.id));
+  pendingRestore = null;
+  if (Android.readProjectMeta) Android.readProjectMeta(token);
+  else Android.readProject(token);
+};
 function syncProjectMenu() {
   const btn = document.getElementById('mi-close-project');
   if (btn) btn.style.display = projectMode() ? 'block' : 'none';
@@ -1533,6 +2706,7 @@ const PluginHost = {
   menus: [],       // { label, cb }  插件注册的菜单项
   skipped: [],     // v4.6 已禁用而未加载的插件文件名
   pages: {},       // v4.6 插件注册的「插件管理页」自定义选项卡 tabId → { title, render }
+  blocked: {},     // v5.8.0 未授权 / 授权失效的插件：name → 'pending' | 'changed' | 'nohash'
 };
 /* v4.6 插件启停：localStorage 'pc_plugins_disabled'（禁用文件名数组）+ 'pc_plugins_enabled'（总开关） */
 function disabledPlugins() { try { return JSON.parse(localStorage.getItem('pc_plugins_disabled') || '[]'); } catch (e) { return []; } }
@@ -1562,8 +2736,23 @@ const PCEvents = { docChange: [], selection: [], fileOpen: [] };
 
 function pcEmit(evt, payload) {
   const arr = PCEvents[evt];
-  if (!arr || !arr.length) return;
-  for (const fn of arr) { try { fn(payload); } catch (e) { console.warn('[plugin] evt ' + evt, e); } }
+  if (arr && arr.length) {
+    /* v5.4.3：监听项改为 { fn, owner }，便于禁用插件时按归属清理 */
+    for (const e of arr.slice()) {
+      if (!e || typeof e.fn !== 'function') continue;
+      try { e.fn(payload); } catch (err) { console.warn('[plugin] evt ' + evt, err); }
+    }
+  }
+  /* v5.4.3 修复（审查 #24）：把事件转发给沙箱插件（只发给订阅过该事件的 Worker），
+     此前 _rpc 的 'on' 只回 true，沙箱里 editor.on() 永远收不到回调。
+     try 包住：SandboxHost 在文件后部才声明，极端早期调用时避免 TDZ 报错。 */
+  try {
+    for (const s of SandboxHost.list) {
+      if (s.events && s.events[evt]) {
+        try { s.worker.postMessage({ type: 'event', evt: evt, payload: payload }); } catch (e) {}
+      }
+    }
+  } catch (e) {}
 }
 function pcApplyExts() {
   if (!cm) return;
@@ -1582,6 +2771,10 @@ function renderToolbar() {
     b.type = 'button';
     b.textContent = it.icon || it.label || '•';
     b.title = it.label || '';
+    /* v5.4.3 修复（审查 #10）：支持声明式激活态。以前插件靠 addToolbarButton() 返回的
+       DOM 引用来改样式，但 renderToolbar() 每次新增按钮都会全量重建，旧引用早已脱离文档。
+       现在每次重建时重新求值 it.active()，插件只需在状态变化后调 refreshToolbar()。 */
+    try { if (typeof it.active === 'function' ? it.active() : it.active) b.classList.add('on'); } catch (e) {}
     /* 关键：mousedown 阶段阻止默认行为，按钮不夺取编辑器焦点，软键盘不会被收起 */
     /* v5.2.6：长按 550ms 显示按钮名称。
        坑：手机上长按【不会】触发 mousedown（触摸是 touchstart → 长按 → contextmenu，
@@ -1641,7 +2834,7 @@ function ensurePalette() {
   inp.addEventListener('keydown', (e) => {
     const rows = el.querySelectorAll('#cp-list .cp-item:not(.cp-item-ctrl)');
     if (e.key === 'Escape') { e.preventDefault(); closePalette(); }
-    else if (e.key === 'ArrowDown') { e.preventDefault(); palSel = Math.min(rows.length - 1, palSel + 1); palMarkSel(); }
+    else if (e.key === 'ArrowDown') { e.preventDefault(); palSel = Math.max(0, Math.min(rows.length - 1, palSel + 1)); palMarkSel(); }
     else if (e.key === 'ArrowUp') { e.preventDefault(); palSel = Math.max(0, palSel - 1); palMarkSel(); }
     else if (e.key === 'Enter') { e.preventDefault(); const r = rows[palSel]; if (r) r.click(); }
   });
@@ -1651,6 +2844,7 @@ function ensurePalette() {
 function openCommandPalette(filter, opts) {
   opts = opts || {};
   const el = ensurePalette();
+  el.dataset.mode = '';
   el.dataset.filter = filter || '';
   el.classList.remove('hidden');
   const box = el.querySelector('.cp-box');
@@ -1703,14 +2897,18 @@ function cpGroups() {
   const soon = t('cp2_soon');
   return [
     { title: t('cp2_g_editor'), items: [
-      { icon: '🔤', label: t('cp2_i_font'), hint: soon },
-      { icon: '↔', label: t('cp2_i_indent'), hint: soon },
+      { icon: '🔤', label: t('cp2_i_font'), type: 'stepper', unit: 'px',
+        get: () => fontSize, set: (v) => setFontSize(v), min: 10, max: 28, step: 1 },
+      { icon: '↔', label: t('cp2_i_indent'), type: 'stepper', unit: ' ',
+        get: () => tabSize, set: (v) => setTabSize(v), min: 2, max: 8, step: 2 },
       { icon: '⊕', label: t('cp2_i_multicursor'), run: () => EditorAPI.runCommand('cursor.mode') },
       { icon: '✨', label: t('cp2_i_format'), run: () => EditorAPI.runCommand('format.light') },
     ]},
     { title: t('cp2_g_engine'), items: [
-      { icon: '⚙', label: t('cp2_i_cpp'), hint: soon },
-      { icon: '🐍', label: t('cp2_i_py'), hint: soon },
+      { icon: '⚙', label: t('cp2_i_cpp'), type: 'select',
+        options: engineOptions('sel-cpp-engine'), get: () => cppEngine, set: (v) => setEngineValue('sel-cpp-engine', v) },
+      { icon: '🐍', label: t('cp2_i_py'), type: 'select',
+        options: engineOptions('sel-py-engine'), get: () => pyEngine, set: (v) => setEngineValue('sel-py-engine', v) },
       { icon: '🧠', label: t('cp2_i_intel'), run: () => { closeControlPanel(); EditorAPI.runCommand('ci.analyze'); } },
     ]},
     { title: t('cp2_g_file'), items: [
@@ -1724,6 +2922,43 @@ function cpGroups() {
       { icon: 'ℹ', label: t('cp2_i_about'), run: () => { closeControlPanel(); const b = $('mi-about'); if (b) b.click(); } },
     ]},
   ];
+}
+/** v5.9.0：控制面板里的行内控件（数值步进 / 下拉），替代原来的「即将推出」 */
+function cpControlRow(it) {
+  const row = document.createElement('div');
+  row.className = 'cp2-row';
+  const ico = document.createElement('span'); ico.className = 'cp2-ico'; ico.textContent = it.icon || '•';
+  const lab = document.createElement('span'); lab.className = 'cp2-label'; lab.textContent = it.label || '';
+  row.appendChild(ico); row.appendChild(lab);
+  if (it.type === 'stepper') {
+    const wrap = document.createElement('span'); wrap.className = 'cp2-step';
+    const minus = document.createElement('button'); minus.type = 'button'; minus.className = 'cp2-stepbtn'; minus.textContent = '−';
+    const val = document.createElement('span'); val.className = 'cp2-stepval';
+    const plus = document.createElement('button'); plus.type = 'button'; plus.className = 'cp2-stepbtn'; plus.textContent = '+';
+    const sync = function () { val.textContent = it.get() + (it.unit || ''); };
+    const apply = function (v) {
+      it.set(Math.max(it.min, Math.min(it.max, v)));
+      sync();
+    };
+    minus.addEventListener('click', function (e) { e.stopPropagation(); apply(it.get() - it.step); });
+    plus.addEventListener('click', function (e) { e.stopPropagation(); apply(it.get() + it.step); });
+    sync();
+    wrap.appendChild(minus); wrap.appendChild(val); wrap.appendChild(plus);
+    row.appendChild(wrap);
+    return row;
+  }
+  const sel = document.createElement('select');
+  sel.className = 'cp2-sel';
+  (it.options || []).forEach(function (o) {
+    const op = document.createElement('option');
+    op.value = o.value; op.textContent = o.label;
+    sel.appendChild(op);
+  });
+  sel.value = it.get();
+  sel.addEventListener('change', function (e) { e.stopPropagation(); it.set(sel.value); });
+  sel.addEventListener('click', function (e) { e.stopPropagation(); });
+  row.appendChild(sel);
+  return row;
 }
 function renderControlPanel() {
   const el = ensureControlPanel();
@@ -1740,6 +2975,7 @@ function renderControlPanel() {
     h.textContent = g.title;
     box.appendChild(h);
     (g.items || []).forEach((it) => {
+      if (it.type === 'stepper' || it.type === 'select') { box.appendChild(cpControlRow(it)); return; }
       const b = document.createElement('button');
       b.className = 'cp2-row' + (it.run ? '' : ' disabled');
       b.type = 'button';
@@ -1772,15 +3008,103 @@ function palMarkSel() {
   rows.forEach(function (r, i) { r.classList.toggle('act', i === palSel); });
   const a = rows[palSel]; if (a && a.scrollIntoView) a.scrollIntoView({ block: 'nearest' });
 }
+/* ============================================================
+ * v5.9.0：顶栏搜索框 → 统一快速搜索（文件 / 符号 / 全文 / 最近命令）
+ * 文件结果内联呈现；符号与全文交给导航插件的面板并预填当前查询词。
+ * ============================================================ */
+function fuzzyScore(name, ql) {
+  const n = String(name || '').toLowerCase();
+  if (!ql) return 0;
+  if (n === ql) return 0;
+  const i = n.indexOf(ql);
+  if (i >= 0) return 1 + i;               // 连续命中：越靠前越好
+  let pos = 0, gaps = 0;                   // 否则退化为子序列匹配（fzf 风格）
+  for (let k = 0; k < ql.length; k++) {
+    const j = n.indexOf(ql[k], pos);
+    if (j < 0) return -1;
+    gaps += j - pos;
+    pos = j + 1;
+  }
+  return 1000 + gaps;
+}
+function openQuickSearch() {
+  const el = ensurePalette();
+  el.dataset.mode = 'search';
+  el.dataset.filter = '';
+  el.classList.remove('hidden');
+  const title = el.querySelector('#cp-titlemode');
+  if (title) title.style.display = 'none';
+  const inp = el.querySelector('#cp-input');
+  inp.style.display = '';
+  inp.value = '';
+  inp.placeholder = t('qs_ph');
+  palSel = 0;
+  renderPalette('', '');
+  setTimeout(function () { try { inp.focus(); } catch (e) {} }, 30);
+}
+function renderQuickSearch(el, q) {
+  const list = el.querySelector('#cp-list');
+  if (!list) return;
+  list.innerHTML = '';
+  const query = String(q || '').trim();
+  const ql = query.toLowerCase();
+  const add = function (icon, label, sub, run) {
+    const b = document.createElement('button');
+    b.className = 'cp-item'; b.type = 'button';
+    const ico = document.createElement('span'); ico.className = 'cp-ico'; ico.textContent = icon;
+    const main = document.createElement('span'); main.className = 'cp-main'; main.textContent = label;
+    const s2 = document.createElement('span'); s2.className = 'cp-sub'; s2.textContent = sub || '';
+    b.appendChild(ico); b.appendChild(main); b.appendChild(s2);
+    b.addEventListener('click', function () {
+      closePalette();
+      try { run(); } catch (e) { outAppend('[搜索] ' + (e && e.message || e) + '\n', 'out-err'); }
+    });
+    list.appendChild(b);
+  };
+  const nav = (window.PCPluginAPI && window.PCPluginAPI.nav) || null;
+  if (!query) {
+    const rec = cpRecent.map(function (id) { return PCCommands.get(id); }).filter(Boolean).slice(0, 5);
+    rec.forEach(function (c) { add('⟳', c.labelKey ? t(c.labelKey) : (c.label || c.id), t('cp_recent'), function () { c.run(); }); });
+    const hint = document.createElement('div'); hint.className = 'cp-empty';
+    hint.textContent = t('qs_empty_hint');
+    list.appendChild(hint);
+    palSel = 0; palMarkSel();
+    return;
+  }
+  const hits = state.files
+    .map(function (f) { return { f: f, s: fuzzyScore(f.name, ql) }; })
+    .filter(function (x) { return x.s >= 0; })
+    .sort(function (a, b) { return a.s - b.s; })
+    .slice(0, 8);
+  hits.forEach(function (h) { add('📄', h.f.name, t('qs_open'), function () { openFile(h.f.name); }); });
+  if (nav) {
+    add('🔍', t('qs_search_all').replace('{q}', query), t('qs_scope_text'), function () { nav.search(query); });
+    add('{}', t('qs_symbols').replace('{q}', query), t('qs_scope_symbol'), function () { nav.symbols(query); });
+    add('🌐', t('qs_gsymbols').replace('{q}', query), t('qs_scope_gsymbol'), function () { nav.gsymbols(query); });
+  }
+  if (!list.children.length) {
+    const em = document.createElement('div'); em.className = 'cp-empty';
+    em.textContent = t('cp_empty');
+    list.appendChild(em);
+  }
+  palSel = 0; palMarkSel();
+}
+
 function renderPalette(prefix, q) {
   const el = $('cmd-palette');
   if (!el) return;
+  if (el.dataset.mode === 'search') { renderQuickSearch(el, q); return; }
   const list = el.querySelector('#cp-list');
   const group = String(prefix || '').replace(/\.$/, '');
   const ql = String(q || '').toLowerCase();
   const items = [...PCCommands.values()]
     .filter(c => !group || (c.group && String(c.group) === group) || String(c.id).startsWith(group + '.'))
     .filter(c => !ql || String(c.label || '').toLowerCase().includes(ql) || String(c.id).toLowerCase().includes(ql));
+  /* v5.9.0：最近使用过的命令排到最前（此前只打「最近」标签，位置不变） */
+  if (cpRecent.length) {
+    const rank = (id) => { const i = cpRecent.indexOf(id); return i < 0 ? 999 : i; };
+    items.sort((a, b) => rank(a.id) - rank(b.id));
+  }
   list.innerHTML = '';
   /* v5.2：置顶「控制面板」入口——与命令并列但置顶、带特殊标记，且不参与命令过滤 */
   const ctrl = document.createElement('button');
@@ -1840,22 +3164,48 @@ const EditorAPI = {
   },
   addToolbarButton(btn) { if (btn) { btn.owner = PCPluginCurrent; PCToolbarItems.push(btn); renderToolbar(); return btn.__el || null; } return null; },
   removeToolbarButton(id) { const i = PCToolbarItems.findIndex(b => b.id === id); if (i >= 0) { PCToolbarItems.splice(i, 1); renderToolbar(); } },
+  /** v5.4.3：重绘工具栏（插件改了按钮状态/文案后调用；返回的 DOM 引用不保证长期有效） */
+  refreshToolbar() { renderToolbar(); },
   registerLanguage(names, factory) { try { PCCM.registerLanguage(names, factory); } catch (e) {} },
-  setLanguage(name) { EditorAPI._ownLang = name || null; if (cm) PCCM.setLang(cm, name); },
+  setLanguage(name) { EditorAPI._ownLang = name || null; if (cm) { PCCM.setLang(cm, name); curHlLang = name || null; } },
+  /** v5.4.3：外部（代码智能等）标注错误时同步内核的 currentErrs，
+   *  否则「编辑该行即消红」与「清除旧标记」都无法工作。传空数组即清除。 */
+  setErrors(list) {
+    if (!cm) return false;
+    const doc = cm.state.doc;
+    currentErrs = [];
+    (list || []).forEach(function (e) {
+      if (!e || !(e.line >= 1) || e.line > doc.lines) return;
+      const l = doc.line(e.line);
+      currentErrs.push({ line: e.line, col: e.col || 1, message: e.message || '', anchor: l.from, anchorEnd: l.to });
+    });
+    try {
+      if (currentErrs.length) PCCM.markErrors(cm, currentErrs);
+      else { PCCM.clearErrors(cm); hideErrBubble(); }
+    } catch (e) {}
+    try { setPanelProblems(currentErrs); } catch (e) {}   // v5.9.0：同步到「问题」面板
+    return true;
+  },
+  clearErrors() { clearCodeErrors(); },
   registerCompletion(lang, source) { PCCompletion.set(lang, source); },
   /* v5.0：把内置补全数据表交给插件（数据在宿主，UI 在插件） */
   get completionData() { return { keywords: PC_KEYWORDS, members: PC_LIB_MEMBERS, includes: PC_INCLUDES }; },
+
   /* v5.1：插件可在 Python 运行时里求值（代码智能用） */
   pyEval(code) { return pyEval(code); },
-  /* v5.1：文件与内容服务（导航 / 全局搜索 / 书签用） */
-  files() { return state.files.map(function (f) { return { name: f.name, content: f.content }; }); },
+  /* v5.1：文件与内容服务（导航 / 全局搜索 / 书签用）；v5.6.0 起 content 可能为 null（惰性未加载） */
+  files() { return state.files.map(function (f) { return { name: f.name, content: f.content, lazy: f.content === null, size: f._size == null ? null : f._size }; }); },
+  /** v5.6.0：把惰性文件全部读入内存（全局搜索 / 全局符号需要），返回本次加载数量 */
+  ensureAll() { return ensureAllContent(); },
   activeFileName() { return state.active; },
   openFile(name) { try { if (name && name !== state.active) { openFile(name); return true; } } catch (e) {} return false; },
   setFileContent(name, content) {
     const f = state.files.find(function (x) { return x.name === name; });
     if (!f) return false;
     f.content = String(content == null ? '' : content);
-    if (state.active === name && cm) { try { PCCM.setDoc(cm, f.content, hlLangOf(name)); } catch (e) {} }
+    f._lazy = false;   // v5.6.0：插件写入后视为已加载
+    viewStates.delete(name);   // v5.7.0：内容由插件改写，旧视图状态作废
+    if (state.active === name && cm) { try { PCCM.setDoc(cm, f.content, hlLangOf(name)); curHlLang = hlLangOf(name); } catch (e) {} }
     try { scheduleSave(); } catch (e) {}
     return true;
   },
@@ -1880,7 +3230,7 @@ const EditorAPI = {
   getSnippets(lang) { return PCSnips.get(lang) || []; },
   registerFormatter(lang, fn) { PCFmt.set(lang, fn); },
   getFormatter(lang) { return PCFmt.get(lang) || null; },
-  on(evt, fn) { if (PCEvents[evt]) PCEvents[evt].push(fn); },
+  on(evt, fn) { if (PCEvents[evt] && typeof fn === 'function') PCEvents[evt].push({ fn: fn, owner: PCPluginCurrent }); },
   focus() { if (cm) cm.focus(); },
   insertText(text) { if (cm) cm.dispatch(cm.state.replaceSelection(String(text == null ? '' : text))); },
   openCommandPalette(filter, opts) { openCommandPalette(filter, opts); }
@@ -1893,6 +3243,9 @@ function unloadPlugin(id) {
   for (const k of [...PCCommands.keys()]) { const c = PCCommands.get(k); if (c && c.owner === id) PCCommands.delete(k); }
   for (let i = PCToolbarItems.length - 1; i >= 0; i--) if (PCToolbarItems[i].owner === id) PCToolbarItems.splice(i, 1);
   for (let i = PCExtEntries.length - 1; i >= 0; i--) if (PCExtEntries[i].owner === id) PCExtEntries.splice(i, 1);
+  /* v5.4.3 修复（审查 #25）：事件监听按归属清理，否则禁用插件后其 docChange/fileOpen 回调仍在跑 */
+  for (const k of Object.keys(PCEvents)) PCEvents[k] = PCEvents[k].filter(function (e) { return !e || e.owner !== id; });
+  PluginHost.menus = PluginHost.menus.filter(function (m) { return !m || m.owner !== id; });
   for (const k of Object.keys(PluginHost.pages)) if (PluginHost.pages[k].__owner === id) delete PluginHost.pages[k];
   PluginHost.loaded = PluginHost.loaded.filter(x => x.id !== id);
   try { if (p.onUnload) p.onUnload(window.PCPluginAPI); } catch (e) { console.warn('[plugin] onUnload', e); }
@@ -1956,6 +3309,17 @@ async function loadBuiltinPlugins() {
 window.PCPluginAPI = {
   apiVersion: 3,   // v3：新增 editor 接口（扩展 / 命令 / 工具栏 / 语言 / 补全 / 片段 / 格式化 / 事件）
   editor: EditorAPI,
+  /** v5.9.0：LanguageService —— 插件注册提供者，宿主负责 documentUri/version、取消与过期丢弃 */
+  lsp: {
+    register: (lang, provider) => LS.register(lang, provider),
+    unregister: (lang) => LS.unregister(lang),
+    request: (kind, lang, params) => LS.request(kind, lang, params),
+    cancel: (requestId) => LS.cancel(requestId),
+    uriOf: (name) => LS.uriOf(name),
+    version: (uri) => LS.version(uri || LS.uriOf()),
+    bump: (uri) => LS.bump(uri || LS.uriOf()),
+    kinds: ['diagnostics', 'completion', 'definition', 'references', 'documentSymbol']
+  },
   /** v5.0：插件可直接使用界面翻译（zh/en），避免硬编码中文 */
   t: (k, ...args) => t(k, ...args),
   hasI18n: (k) => k in I18N.zh || k in I18N.en,
@@ -1975,7 +3339,7 @@ window.PCPluginAPI = {
       PluginHost.langs[String(e).toLowerCase()] = { def: L, plugin: meta };
     }));
     (meta.menu || []).forEach(m => PluginHost.menus.push(
-      typeof m === 'string' ? { label: m, cb: null } : { label: String(m.label || ''), cb: m.onClick }));
+      typeof m === 'string' ? { label: m, cb: null, owner: meta.id } : { label: String(m.label || ''), cb: m.onClick, owner: meta.id }));
     PluginHost.loaded.push(meta);
     return true;
   },
@@ -2022,6 +3386,8 @@ window.PCPluginAPI = {
           resolve({ code: parseInt(String(exit).trim(), 10) || 0, output: out });
         } else if (Date.now() - t0 > 120000) {
           clearInterval(timer);
+          /* v5.4.3 修复（审查 #21）：超时也要清理临时文件，否则 plug_*.out/.exit 永久残留 */
+          try { Android.deleteSwapFile(tag + '.exit'); Android.deleteSwapFile(tag + '.out'); } catch (e) {}
           resolve({ code: -1, output: 'runCapture 超时（120 秒）\n' });
         }
       }, 300);
@@ -2043,61 +3409,256 @@ window.PCPluginAPI = {
   readSwapFile: (name) => (window.Android && Android.readSwapFile) ? (Android.readSwapFile(String(name)) || '') : '',
   deleteSwapFile: (name) => !!(window.Android && Android.deleteSwapFile) && Android.deleteSwapFile(String(name)),
 };
+/* ============================================================
+ * v5.8.0 插件信任模型
+ * 记录：{ sha256, size, version, approvedAt, permissions{storage,network,workspace,termux}, mode:'sandbox'|'inline' }
+ * 规则：
+ *  · 没有记录 = 未授权 → 不执行（不再用「见过文件名」当信任依据）
+ *  · 记录哈希 == 共享文件哈希 → 已授权；同时把源码复制到应用私有目录留底
+ *  · 共享文件被改但私有副本仍是批准版本 → 继续运行私有副本，标记「更新待授权」
+ *  · 共享文件被改且没有可用副本 → 授权失效，必须重新授权
+ * 共享目录（/sdcard/QingCode/plugins）只作导入入口，执行优先使用私有副本。
+ * ============================================================ */
+const PLUGIN_TRUST_KEY = 'pc_plugin_trust';
+const PLUGIN_PERM_KEYS = ['storage', 'network', 'workspace', 'termux'];
+const PLUGIN_DEFAULT_PERMS = { storage: false, network: true, workspace: true, termux: false };
+const pluginInfos = new Map();   // name -> { name, size, mtime, sha256, cacheSha256 }（本次启动读取）
+
+function normPerms(p) {
+  const o = {};
+  for (const k of PLUGIN_PERM_KEYS) o[k] = !!(p && p[k]);
+  return o;
+}
+const PluginTrust = {
+  all() {
+    try {
+      const v = JSON.parse(localStorage.getItem(PLUGIN_TRUST_KEY) || '{}');
+      return (v && typeof v === 'object' && !Array.isArray(v)) ? v : {};
+    } catch (e) { return {}; }
+  },
+  save(obj) {
+    try { localStorage.setItem(PLUGIN_TRUST_KEY, JSON.stringify(obj || {})); return true; }
+    catch (e) { storeIssue(t('store_meta_fail')); return false; }
+  },
+  get(name) {
+    const r = this.all()[name];
+    return (r && typeof r === 'object') ? r : null;
+  },
+  approve(name, info, perms, mode) {
+    const all = this.all();
+    const prev = all[name] || {};
+    const rec = {
+      sha256: (info && info.sha256) || '',
+      size: info ? (info.size == null ? null : info.size) : null,
+      version: (typeof prev.version === 'number' ? prev.version : 0) + 1,
+      approvedAt: Date.now(),
+      permissions: normPerms(perms),
+      mode: mode === 'inline' ? 'inline' : 'sandbox'
+    };
+    all[name] = rec;
+    this.save(all);
+    return rec;
+  },
+  revoke(name) {
+    const all = this.all();
+    delete all[name];
+    this.save(all);
+    try { if (window.Android && Android.deletePluginCopy) Android.deletePluginCopy(name); } catch (e) {}
+  },
+  /** 只改运行模式（沙箱 / 主线程），保留哈希与权限 */
+  setMode(name, mode) {
+    const all = this.all();
+    const rec = all[name];
+    if (!rec) return false;
+    rec.mode = (mode === 'inline') ? 'inline' : 'sandbox';
+    this.save(all);
+    return true;
+  },
+  permsOf(name) {
+    const r = this.get(name);
+    return r ? normPerms(r.permissions) : normPerms(PLUGIN_DEFAULT_PERMS);
+  }
+};
+
+/** 授权状态：approved | stale-shared（运行私有副本，更新待授权）| pending（未授权）| changed（授权失效）| nohash（无法校验） */
+function pluginTrustState(name, info) {
+  const rec = PluginTrust.get(name);
+  if (!rec || !rec.sha256) return 'pending';
+  if (!info || !info.sha256) return 'nohash';
+  if (rec.sha256 === info.sha256) return 'approved';
+  if (info.cacheSha256 && info.cacheSha256 === rec.sha256) return 'stale-shared';
+  return 'changed';
+}
+function pluginTrustLabel(state) {
+  return state === 'approved' ? t('pp_trust_ok')
+    : state === 'stale-shared' ? t('pp_trust_stale')
+    : state === 'changed' ? t('pp_trust_changed')
+    : state === 'nohash' ? t('pp_trust_nohash')
+    : t('pp_trust_pending');
+}
+/** 是否在沙箱运行：信任记录优先（mode），旧版 pc_plugins_inline 作为兜底 */
+function isPluginSandboxed(name) {
+  const rec = PluginTrust.get(name);
+  if (rec && rec.mode) return rec.mode !== 'inline';
+  return SandboxHost.inlineList().indexOf(name) < 0;
+}
+/** 取可执行源码：批准版本优先用私有副本；否则用共享文件并同步留底 */
+function resolvePluginSource(name, info, state) {
+  if (state === 'stale-shared') {
+    let c = ''; try { c = (Android.readPluginCopy && Android.readPluginCopy(name)) || ''; } catch (e) { c = ''; }
+    return c || null;
+  }
+  let src = '';
+  try { src = Android.readPlugin(name) || ''; } catch (e) { src = ''; }
+  if (!src) return null;
+  try {
+    if (window.Android && Android.cachePluginCopy && (!info || info.cacheSha256 !== info.sha256)) {
+      Android.cachePluginCopy(name, src);   // 批准版本留底，共享目录以后被改也能继续跑这份
+    }
+  } catch (e) {}
+  return src;
+}
+/** 旧版信任数据迁移：只有「此前确实被用户启用过」的插件才继承授权（迁移时记录当前哈希） */
+function migrateLegacyPluginTrust(infos) {
+  try { if (localStorage.getItem('pc_trust_migrated') === '1') return; } catch (e) { return; }
+  let seen = [], inline = [], disabled = [];
+  try { seen = JSON.parse(localStorage.getItem('pc_plugins_seen') || '[]') || []; } catch (e) {}
+  try { inline = JSON.parse(localStorage.getItem('pc_plugins_inline') || '[]') || []; } catch (e) {}
+  try { disabled = JSON.parse(localStorage.getItem('pc_plugins_disabled') || '[]') || []; } catch (e) {}
+  const all = PluginTrust.all();
+  let migrated = 0;
+  for (const info of infos) {
+    const n = info && info.name;
+    if (!n || all[n] || !info.sha256) continue;
+    if (seen.indexOf(n) < 0 || disabled.indexOf(n) >= 0) continue;
+    PluginTrust.approve(n, info,
+      { storage: true, network: true, workspace: true, termux: true },   // 旧版没有权限模型，实际等同全权
+      inline.indexOf(n) >= 0 ? 'inline' : 'sandbox');
+    migrated++;
+  }
+  try { localStorage.setItem('pc_trust_migrated', '1'); } catch (e) {}
+  if (migrated) outMeta(t('pp_trust_migrated').replace('{n}', migrated));
+}
+
+/* ---------- 权限闸门：主线程插件按声明裁剪能力 ---------- */
+const pluginDenied = new Set();
+function pluginDeny(file, perm, what) {
+  const k = file + '|' + perm;
+  if (pluginDenied.has(k)) return;
+  pluginDenied.add(k);
+  outAppend('⚠ [插件] ' + file + ' 调用 ' + what + ' 需要「' + perm + '」权限，已拒绝（可在插件管理页重新授权）\n', 'out-err');
+}
+function pluginAPIFor(file) {
+  const base = window.PCPluginAPI;
+  const rec = PluginTrust.get(file);
+  const perms = rec ? normPerms(rec.permissions) : normPerms(PLUGIN_DEFAULT_PERMS);
+  const api = Object.create(base);
+  api.editor = Object.create(base.editor);
+  api.trust = { pluginId: file, permissions: perms, mode: (rec && rec.mode) || 'sandbox' };
+  if (!perms.termux) {
+    api.execTermux = function () { pluginDeny(file, 'termux', 'execTermux'); return false; };
+    api.runCapture = function () { pluginDeny(file, 'termux', 'runCapture'); return Promise.resolve({ code: -1, output: '权限未授予：termux\n' }); };
+  }
+  if (!perms.storage) {
+    api.writeSwapFile = function () { pluginDeny(file, 'storage', 'writeSwapFile'); return false; };
+    api.readSwapFile = function () { pluginDeny(file, 'storage', 'readSwapFile'); return ''; };
+    api.deleteSwapFile = function () { pluginDeny(file, 'storage', 'deleteSwapFile'); return false; };
+  }
+  if (!perms.workspace) {
+    api.editor.files = function () { pluginDeny(file, 'workspace', 'editor.files'); return []; };
+    api.editor.ensureAll = function () { return 0; };
+    api.editor.setFileContent = function () { pluginDeny(file, 'workspace', 'editor.setFileContent'); return false; };
+    api.editor.saveAll = function () { return false; };
+    api.editor.openFile = function () { return false; };
+  }
+  return api;
+}
+
 async function loadPlugins() {
   if (!(window.Android && Android.listPlugins && Android.readPlugin)) return;
-  let names = [];
-  try { names = JSON.parse(Android.listPlugins()) || []; } catch (e) { return; }
-  if (!names.length) return;
+  let infos = [];
+  try {
+    if (window.Android.pluginInfo) infos = JSON.parse(Android.pluginInfo()) || [];
+    else infos = (JSON.parse(Android.listPlugins()) || []).map(n => ({ name: n, sha256: '', cacheSha256: '' }));
+  } catch (e) { return; }
+  if (!Array.isArray(infos)) infos = [];
+  pluginInfos.clear();
+  for (const it of infos) if (it && it.name) pluginInfos.set(it.name, it);
+  if (!infos.length) return;
   // v4.6 总开关：关闭则不加载任何插件
   if (!pluginsEnabled()) {
     outMeta(LANG === 'en' ? 'Plugin system disabled (Plugin manager → Settings)' : '插件系统已关闭（插件管理 → 设置）');
     return;
   }
+  migrateLegacyPluginTrust(infos);
   const disabled = disabledPlugins();
-  /* v5.4.1 安全（审查 #2）：/sdcard 下【新出现的】插件默认禁用，必须先到插件管理页确认再启用。
-     这样其他有存储权限的应用往插件目录丢 .js，不会被下次启动直接执行（也就拿不到 Termux 命令能力）。 */
-  let seen = [];
-  try { seen = JSON.parse(localStorage.getItem('pc_plugins_seen') || '[]'); } catch (e) { seen = []; }
-  if (!Array.isArray(seen)) seen = [];
-  let seenChanged = false;
-  for (const n of names) {
-    if (seen.indexOf(n) >= 0) continue;
-    seen.push(n); seenChanged = true;
-    if (disabled.indexOf(n) < 0) { disabled.push(n); setPluginDisabled(n, true); }
-    outMeta('[插件] 发现新插件 ' + n + '，已默认禁用（如确认可信，请到「插件管理」中启用）');
-  }
-  if (seenChanged) { try { localStorage.setItem('pc_plugins_seen', JSON.stringify(seen)); } catch (e) {} }
-  for (const n of names) {
+  PluginHost.blocked = PluginHost.blocked || {};
+  const warned = new Set();
+  for (const info of infos) {
+    const n = info && info.name;
+    if (!n) continue;
+    if (disabled.indexOf(n) >= 0) { PluginHost.skipped.push(n); continue; }   // v4.6 用户显式禁用
+    const state = pluginTrustState(n, info);
+    if (state !== 'approved' && state !== 'stale-shared') {
+      PluginHost.skipped.push(n);
+      PluginHost.blocked[n] = state;
+      if (!warned.has(n)) {
+        warned.add(n);
+        outMeta(state === 'changed'
+          ? t('pp_trust_changed_note').replace('{name}', n)
+          : t('pp_trust_new_note').replace('{name}', n));
+      }
+      continue;
+    }
+    const src = resolvePluginSource(n, info, state);
+    if (!src) {
+      PluginHost.blocked[n] = 'changed';
+      PluginHost.skipped.push(n);
+      outAppend((LANG === 'en' ? '[plugin] cannot read: ' : '[插件] 读取失败：') + n + '\n', 'out-err');
+      continue;
+    }
     try {
-      if (disabled.indexOf(n) >= 0) { PluginHost.skipped.push(n); continue; }  // v4.6 禁用跳过
-      const src = Android.readPlugin(n);
-      if (!src) continue;
-      /* v5.4：标记为沙箱运行的插件 → 在 Worker 中执行，不进主线程 */
-      if (SandboxHost.isSandboxed(n)) {
-        SandboxHost.spawn(n, src);
-        PluginHost.sandboxed = PluginHost.sandboxed || [];
-        PluginHost.sandboxed.push(n);
+      if (isPluginSandboxed(n)) {
+        const entry = SandboxHost.spawn(n, src);
+        if (entry) {
+          PluginHost.sandboxed = PluginHost.sandboxed || [];
+          PluginHost.sandboxed.push(n);
+        } else {
+          /* v5.9.1：Worker 创建失败时不要把它记成「沙箱运行中」，否则管理页显示假状态 */
+          PluginHost.blocked[n] = 'error';
+          if (PluginHost.skipped.indexOf(n) < 0) PluginHost.skipped.push(n);
+          outAppend((LANG === 'en' ? '[plugin] sandbox failed: ' : '[插件] 沙箱启动失败：') + n + '\n', 'out-err');
+        }
         continue;
       }
+      const api = pluginAPIFor(n);
       const before = PluginHost.loaded.length;
-      new Function('PCPluginAPI', src)(window.PCPluginAPI);
-      for (let i = before; i < PluginHost.loaded.length; i++) PluginHost.loaded[i].__file = n; // v4.6 记录来源文件（供启停管理）
-      outAppend((LANG === 'en' ? '[plugin] loaded: ' : '[插件] 已加载：') + n + '\n', 'out-echo');
+      new Function('PCPluginAPI', src)(api);
+      for (let i = before; i < PluginHost.loaded.length; i++) {
+        PluginHost.loaded[i].__file = n;   // v4.6 记录来源文件（供启停管理）
+        PluginHost.loaded[i].__api = api;  // v5.8.0：onInit / 后续回调都用带权限裁剪的 API
+      }
+      outAppend((LANG === 'en' ? '[plugin] loaded: ' : '[插件] 已加载：') + n
+        + (state === 'stale-shared' ? (LANG === 'en' ? ' (approved copy)' : '（运行已批准的私有副本）') : '') + '\n', 'out-echo');
     } catch (e) {
       outAppend((LANG === 'en' ? '[plugin] load failed: ' : '[插件] 加载失败：') + n + ' — ' + (e.message || e) + '\n', 'out-err');
     }
   }
-  PluginHost.loaded.forEach(p => { if (p.__builtinInit) return; p.__builtinInit = true; PCPluginCurrent = p.id || null; try { p.onInit && p.onInit(window.PCPluginAPI); } catch (e) { console.warn('[plugin]', p.id, e); } PCPluginCurrent = null; });
+  PluginHost.loaded.forEach(p => { if (p.__builtinInit) return; p.__builtinInit = true; PCPluginCurrent = p.id || null; try { p.onInit && p.onInit(p.__api || window.PCPluginAPI); } catch (e) { console.warn('[plugin]', p.id, e); } PCPluginCurrent = null; });
   renderPluginMenus();
   outMeta((LANG === 'en' ? 'Plugins loaded: ' : '已加载插件：') + PluginHost.loaded.length
     + (PluginHost.skipped.length ? (LANG === 'en' ? ' (disabled: ' + PluginHost.skipped.length + ')' : '（已禁用 ' + PluginHost.skipped.length + ' 个）') : ''));
 }
 function renderPluginMenus() {
-  if (!PluginHost.menus.length) return;
   const anchor = $('mi-about');
   if (!anchor) return;
+  /* v5.4.3 修复：每次重绘先移除旧菜单项。此前只 insertBefore 不清理，
+     loadBuiltinPlugins/loadPlugins/unloadPlugin 每次调用都会重复插入一份。 */
+  document.querySelectorAll('#more-menu .plugin-menu-item').forEach(function (el) { el.remove(); });
+  if (!PluginHost.menus.length) return;
   PluginHost.menus.forEach(m => {
     const b = document.createElement('button');
+    b.className = 'plugin-menu-item';
     b.textContent = '🧩 ' + m.label;
     b.addEventListener('click', () => {
       $('more-menu').classList.add('hidden');
@@ -2125,14 +3686,6 @@ function confirmSandboxOff(file) {
   });
   modalMode = 'plugin-sandbox-off';
 }
-function confirmEnablePlugin(file) {
-  pendingPluginFile = file || null;
-  showModal({
-    title: t('pp_warn_title'), withInput: false, okText: t('pp_warn_ok'),
-    desc: t('pp_warn_desc'), showCancel: true
-  });
-  modalMode = 'plugin-enable';
-}
 
 /* ============================================================
  * v5.4：本地安全沙箱（Web Worker）
@@ -2146,11 +3699,13 @@ const SandboxHost = {
   list: [],
   inlineList() { try { const v = JSON.parse(localStorage.getItem(SANDBOX_INLINE_KEY) || '[]'); return Array.isArray(v) ? v : []; } catch (e) { return []; } },
   saveInlineList(v) { try { localStorage.setItem(SANDBOX_INLINE_KEY, JSON.stringify(v || [])); } catch (e) {} },
-  /* v5.4.2：默认在沙箱运行；只有被用户显式「信任到主线程」的插件才 inline 运行 */
-  isSandboxed(file) { return this.inlineList().indexOf(file) < 0; },
+  /* v5.4.2：默认在沙箱运行；v5.8.0：运行模式记在信任记录里（mode），旧列表仅作兜底 */
+  isSandboxed(file) { return isPluginSandboxed(file); },
   setSandbox(file, on) {
+    const mode = on ? 'sandbox' : 'inline';
+    PluginTrust.setMode(file, mode);
     const list = this.inlineList().filter(function (x) { return x !== file; });
-    if (!on) list.push(file);
+    if (mode === 'inline') list.push(file);
     this.saveInlineList(list);
     this.stop(file);
   },
@@ -2160,7 +3715,7 @@ const SandboxHost = {
     if (this.running(file)) return null;
     let w;
     try { w = new Worker('sandbox-worker.js'); } catch (e) { outAppend('[沙箱] 无法创建 Worker：' + (e.message || e) + '\n', 'out-err'); return null; }
-    const entry = { file: file, worker: w, commands: [] };
+    const entry = { file: file, worker: w, commands: [], events: {} };
     this.list.push(entry);
     w.onmessage = (e) => this._onMsg(entry, e.data || {});
     w.onerror = (e) => { outAppend('[沙箱] ' + file + ' 运行错误：' + ((e && e.message) || e) + '\n', 'out-err'); };
@@ -2172,6 +3727,18 @@ const SandboxHost = {
     else if (d.type === 'registered') outMeta('🧪 [沙箱] ' + entry.file + ' 注册插件 ' + d.id);
     else if (d.type === 'error') outAppend('🧪 [沙箱] ' + entry.file + '：' + d.message + '\n', 'out-err');
     else if (d.type === 'log') outMeta('🧪 ' + entry.file + '：' + d.msg);
+    else if (d.type === 'unloaded') outMeta('🧪 [沙箱] ' + entry.file + ' 已卸载（onUnload 已调用）');
+    /* v5.9.0：命令执行结果回传——此前 call-result 无人处理，插件里的异常完全看不到 */
+    else if (d.type === 'call-result') {
+      entry.lastResult = { cmd: d.cmd || '', ok: !!d.ok, value: d.result, error: d.error || '' };
+      if (!d.ok) {
+        outAppend('🧪 [沙箱] ' + entry.file + ' 命令 ' + (d.cmd || '?') + ' 执行失败：'
+          + (d.error || '未注册该命令') + '\n', 'out-err');
+      }
+      if (entry.events && entry.events['commandResult']) {
+        try { entry.worker.postMessage({ type: 'event', evt: 'commandResult', payload: entry.lastResult }); } catch (e) {}
+      }
+    }
     else if (d.type === 'rpc') this._rpc(entry, d);
   },
   _rpc(entry, d) {
@@ -2183,7 +3750,13 @@ const SandboxHost = {
         case 'setText': {
           if (cm) {
             const cur = state.files.find(x => x.name === state.active);
-            if (cur) { cur.content = String(a[0] == null ? '' : a[0]); PCCM.setDoc(cm, cur.content, hlLangOf(state.active)); scheduleSave(); }
+            if (cur) {
+              cur.content = String(a[0] == null ? '' : a[0]);
+              viewStates.delete(state.active);   // v5.7.0：沙箱改写全文，旧视图状态作废
+              PCCM.setDoc(cm, cur.content, hlLangOf(state.active));
+              curHlLang = hlLangOf(state.active);
+              scheduleSave();
+            }
           }
           reply(true, true); break;
         }
@@ -2191,7 +3764,7 @@ const SandboxHost = {
         case 'currentLanguage': reply(true, EditorAPI.currentLanguage()); break;
         case 'activeFileName': reply(true, state.active); break;
         case 't': reply(true, t(String(a[0]))); break;
-        case 'on': reply(true, true); break;
+        case 'on': entry.events[String(a[0])] = true; reply(true, true); break;   // v5.4.3：记录订阅，pcEmit 据此转发事件
         case 'registerCommand': {
           const cmdId = String(a[0]), label = String(a[1]);
           EditorAPI.registerCommand(cmdId, { label: label, group: 'sandbox', run: function () {
@@ -2201,6 +3774,12 @@ const SandboxHost = {
           if (entry.commands.indexOf(cmdId) < 0) entry.commands.push(cmdId);
           reply(true, true); break;
         }
+        /* v5.9.0：沙箱拿不到的注册类能力，明确告诉插件为什么失败 */
+        case 'registerLanguage': case 'registerSnippets': case 'registerCompletion':
+        case 'registerFormatter': case 'addToolbarButton': case 'removeToolbarButton':
+        case 'registerMenu': case 'page':
+          reply(false, null, '沙箱内不支持 ' + d.method + '：请信任并改为主线程运行');
+          break;
         default: reply(false, null, 'unknown method: ' + d.method);
       }
     } catch (e) { reply(false, null, String(e && e.message || e)); }
@@ -2208,10 +3787,11 @@ const SandboxHost = {
   stop(file) {
     const i = this.list.findIndex(x => x.file === file);
     if (i < 0) return;
-    const e = this.list[i];
-    try { e.worker.terminate(); } catch (err) {}
+    const e = this.list.splice(i, 1)[0];
     for (const id of e.commands) { try { EditorAPI.unregisterCommand(id); } catch (err) {} }
-    this.list.splice(i, 1);
+    /* v5.9.0：先给插件一次 onUnload 的机会，再强制 terminate（最多等 250ms） */
+    try { e.worker.postMessage({ type: 'unload' }); } catch (err) {}
+    setTimeout(function () { try { e.worker.terminate(); } catch (err) {} }, 250);
   },
   stopAll() { this.list.slice().forEach(e => this.stop(e.file)); }
 };
@@ -2399,10 +3979,27 @@ function renderLoadedTab(body) {
     head.appendChild(nm); head.appendChild(bd);
     const desc = document.createElement('div'); desc.className = 'pp-card-desc'; desc.textContent = t('pp_sandbox_running');
     card.appendChild(head); card.appendChild(desc);
+    /* v5.8.0：沙箱插件同样要能看到授权状态，并能撤销授权（否则默认沙箱的插件没有入口） */
+    card.appendChild(pluginTrustSection(e.file));
     const foot = document.createElement('div'); foot.className = 'pp-card-foot';
+    /* v5.4.3 修复（审查 #1）：沙箱插件不会进入 PluginHost.loaded（loadPlugins 里 spawn 后直接
+       continue），而「沙箱开/关」按钮只渲染在 loaded 插件卡片上 —— 用户永远没有入口把插件
+       切回主线程。这里给沙箱卡片补一个显式入口，复用同一套二次确认。 */
+    const tr = document.createElement('button'); tr.className = 'pp-btn'; tr.textContent = t('pp_sandbox_trust');
+    tr.addEventListener('click', function () { confirmSandboxOff(e.file); });
+    foot.appendChild(tr);
     const st = document.createElement('button'); st.className = 'pp-btn pp-btn-danger'; st.textContent = t('pp_sandbox_stop');
     st.addEventListener('click', function () { SandboxHost.stop(e.file); openPluginPage(); });
-    foot.appendChild(st); card.appendChild(foot);
+    foot.appendChild(st);
+    const rv = document.createElement('button'); rv.className = 'pp-btn pp-btn-danger'; rv.textContent = t('pp_trust_revoke');
+    rv.addEventListener('click', function () {
+      PluginTrust.revoke(e.file);
+      SandboxHost.stop(e.file);
+      outMeta(t('pp_trust_revoked').replace('{name}', e.file));
+      openPluginPage();
+    });
+    foot.appendChild(rv);
+    card.appendChild(foot);
     body.appendChild(card);
   });
   if (!PluginHost.loaded.length && !PluginHost.skipped.length) {
@@ -2417,7 +4014,11 @@ function renderLoadedTab(body) {
 }
 function pluginCard(p) {
   const card = document.createElement('div');
-  card.className = 'pp-card' + (p.__disabled ? ' off' : '');
+  const isUser = !!(p.__file && !p.__builtin);
+  const info = isUser ? (pluginInfos.get(p.__file) || null) : null;
+  const trust = isUser ? pluginTrustState(p.__file, info) : 'approved';
+  const approved = (trust === 'approved' || trust === 'stale-shared');
+  card.className = 'pp-card' + ((p.__disabled || !approved) ? ' off' : '');
   const head = document.createElement('div'); head.className = 'pp-card-head';
   head.innerHTML = '<span class="pp-card-icon">🧩</span><span class="pp-card-name"></span><span class="pp-card-ver"></span>';
   head.querySelector('.pp-card-name').textContent = p.name || p.id || p.__file || '?';
@@ -2434,11 +4035,26 @@ function pluginCard(p) {
     d.textContent = p.description;
     card.appendChild(d);
   }
+  /* v5.8.0：用户插件的信任状态 / 权限 / 授权入口 */
+  if (isUser) card.appendChild(pluginTrustSection(p.__file));
+
   const foot = document.createElement('div'); foot.className = 'pp-card-foot';
   const st = document.createElement('span');
-  st.className = 'pp-state' + (p.__disabled ? ' off' : '');
-  st.textContent = p.__disabled ? t('pp_disabled') : t('pp_enabled');
+  st.className = 'pp-state' + ((p.__disabled || !approved) ? ' off' : '');
+  st.textContent = !approved ? t('pp_trust_not_running') : (p.__disabled ? t('pp_disabled') : t('pp_enabled'));
   foot.appendChild(st);
+
+  /* 未授权 / 授权失效：不提供「启用」，必须先授权（授权按钮在信任区块里） */
+  if (isUser && !approved) {
+    const del0 = document.createElement('button');
+    del0.className = 'pp-btn pp-btn-danger';
+    del0.textContent = t('pp_delete');
+    del0.addEventListener('click', () => confirmDeletePlugin(p));
+    foot.appendChild(del0);
+    card.appendChild(foot);
+    return card;
+  }
+
   const btn = document.createElement('button'); btn.className = 'pp-btn';
   btn.textContent = p.__disabled ? t('pp_enable') : t('pp_disable');
   btn.addEventListener('click', () => {
@@ -2449,15 +4065,20 @@ function pluginCard(p) {
       else { unloadPlugin(p.id); openPluginPage(); }
       return;
     }
-    /* /sdcard 用户插件：启用前必须先弹安全提示（未经审核） */
-    if (p.__disabled) { confirmEnablePlugin(p.__file); return; }
+    /* 用户插件：已授权 → 直接启停；未授权走上面的授权区块 */
+    if (p.__disabled) {
+      setPluginDisabled(p.__file, false);
+      try { if (window.Android && Android.showToast) Android.showToast(t('pp_toggle_restart')); } catch (e) {}
+      openPluginPage();
+      return;
+    }
     setPluginDisabled(p.__file, true);
     try { if (window.Android && Android.showToast) Android.showToast(t('pp_toggle_restart')); } catch (e) {}
     openPluginPage();
   });
   foot.appendChild(btn);
   /* 只有 /sdcard 用户插件可删除（内置插件随包，删不掉也不该删） */
-  if (p.__file && !p.__builtin) {
+  if (isUser) {
     /* v5.4：沙箱开关（切换后重启生效） */
     const sb = document.createElement('button');
     sb.className = 'pp-btn';
@@ -2471,6 +4092,16 @@ function pluginCard(p) {
       openPluginPage();
     });
     foot.appendChild(sb);
+    const rv = document.createElement('button');
+    rv.className = 'pp-btn pp-btn-danger';
+    rv.textContent = t('pp_trust_revoke');
+    rv.addEventListener('click', function () {
+      PluginTrust.revoke(p.__file);
+      setPluginDisabled(p.__file, true);
+      outMeta(t('pp_trust_revoked').replace('{name}', p.__file));
+      openPluginPage();
+    });
+    foot.appendChild(rv);
     const del = document.createElement('button');
     del.className = 'pp-btn pp-btn-danger';
     del.textContent = t('pp_delete');
@@ -2479,6 +4110,85 @@ function pluginCard(p) {
   }
   card.appendChild(foot);
   return card;
+}
+
+/** 插件卡片里的信任区块：状态徽标 + 内容指纹 + 权限清单 / 勾选授权 */
+function pluginTrustSection(name) {
+  const info = pluginInfos.get(name) || null;
+  const state = pluginTrustState(name, info);
+  const rec = PluginTrust.get(name);
+  const box = document.createElement('div');
+  box.className = 'pp-trust';
+  const head = document.createElement('div'); head.className = 'pp-trust-head';
+  const badge = document.createElement('span');
+  badge.className = 'pp-badge ' + (state === 'approved' ? 'ok' : state === 'stale-shared' ? 'warn' : 'bad');
+  badge.textContent = pluginTrustLabel(state);
+  head.appendChild(badge);
+  if (info && info.sha256) {
+    const h = document.createElement('span'); h.className = 'pp-trust-hash';
+    h.textContent = t('pp_trust_hash') + ' ' + String(info.sha256).slice(0, 8);
+    head.appendChild(h);
+  }
+  box.appendChild(head);
+
+  if (rec && (state === 'approved' || state === 'stale-shared')) {
+    const p = normPerms(rec.permissions);
+    const granted = PLUGIN_PERM_KEYS.filter(k => p[k]);
+    const line = document.createElement('div'); line.className = 'pp-card-meta';
+    line.textContent = t('pp_trust_perm') + ': '
+      + (granted.length ? granted.map(k => t('pp_perm_' + k)).join(' · ') : t('pp_perm_none'))
+      + '   (v' + (rec.version || 1) + ')';
+    box.appendChild(line);
+    return box;
+  }
+
+  /* 未授权 / 内容已变化：逐项勾选权限后授权 */
+  const pick = document.createElement('div'); pick.className = 'pp-perm-pick';
+  const dft = normPerms(PLUGIN_DEFAULT_PERMS);
+  const boxes = {};
+  PLUGIN_PERM_KEYS.forEach(function (k) {
+    const lab = document.createElement('label'); lab.className = 'pp-perm-item';
+    const cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = !!dft[k];
+    const sp = document.createElement('span'); sp.textContent = t('pp_perm_' + k);
+    lab.appendChild(cb); lab.appendChild(sp);
+    pick.appendChild(lab);
+    boxes[k] = cb;
+  });
+  box.appendChild(pick);
+  const foot = document.createElement('div'); foot.className = 'pp-card-foot';
+  const btn = document.createElement('button');
+  btn.className = 'pp-btn pp-btn-primary';
+  btn.textContent = t('pp_trust_approve');
+  btn.addEventListener('click', function () {
+    const perms = {};
+    PLUGIN_PERM_KEYS.forEach(function (k) { perms[k] = !!boxes[k].checked; });
+    approvePlugin(name, perms);
+  });
+  foot.appendChild(btn);
+  box.appendChild(foot);
+  return box;
+}
+
+/** 授权并启用：记录内容指纹 + 权限，并把源码复制到应用私有目录作为执行副本 */
+function approvePlugin(name, perms) {
+  const info = pluginInfos.get(name) || null;
+  if (!info || !info.sha256) {
+    outAppend('⚠ 无法读取插件内容指纹，拒绝授权：' + name + '\n', 'out-err');
+    return false;
+  }
+  const rec = PluginTrust.approve(name, info, perms, isPluginSandboxed(name) ? 'sandbox' : 'inline');
+  if (!rec) return false;
+  setPluginDisabled(name, false);   // 授权即启用
+  try {
+    if (window.Android && Android.cachePluginCopy) {
+      const src = Android.readPlugin(name) || '';
+      if (src) Android.cachePluginCopy(name, src);
+    }
+  } catch (e) {}
+  outMeta(t('pp_trust_approved').replace('{name}', name).replace('{h}', String(rec.sha256).slice(0, 8)));
+  try { if (window.Android && Android.showToast) Android.showToast(t('pp_trust_need_restart')); } catch (e) {}
+  openPluginPage();
+  return true;
 }
 function renderLangsTab(body) {
   const keys = Object.keys(PluginHost.langs);
@@ -2530,9 +4240,91 @@ function renderSettingsTab(body) {
   foot.appendChild(st); foot.appendChild(btn);
   row.appendChild(foot);
   body.appendChild(row);
+  /* v5.9.0：常用键条开关（横屏/平板上尤其有用） */
+  const kbRow = document.createElement('div'); kbRow.className = 'pp-card';
+  const kbHead = document.createElement('div'); kbHead.className = 'pp-card-head';
+  kbHead.innerHTML = '<span class="pp-card-name"></span>';
+  kbHead.querySelector('.pp-card-name').textContent = t('kb_title');
+  kbRow.appendChild(kbHead);
+  const kbDesc = document.createElement('div'); kbDesc.className = 'pp-card-desc';
+  kbDesc.textContent = t('kb_desc');
+  kbRow.appendChild(kbDesc);
+  const kbFoot = document.createElement('div'); kbFoot.className = 'pp-card-foot';
+  const kbState = document.createElement('span');
+  kbState.className = 'pp-state' + (keybarEnabled() ? '' : ' off');
+  kbState.textContent = keybarEnabled() ? t('pp_enabled') : t('pp_disabled');
+  const kbBtn = document.createElement('button'); kbBtn.className = 'pp-btn';
+  kbBtn.textContent = keybarEnabled() ? t('pp_disable') : t('pp_enable');
+  kbBtn.addEventListener('click', function () { setKeybarEnabled(!keybarEnabled()); renderSettingsTab($('pp-body')); });
+  kbFoot.appendChild(kbState); kbFoot.appendChild(kbBtn);
+  kbRow.appendChild(kbFoot);
+  body.appendChild(kbRow);
+
+  /* v5.9.0：在线安装插件（从链接下载 .js → 写入插件目录 → 仍是「未授权」，需勾选权限） */
+  const inst = document.createElement('div'); inst.className = 'pp-card';
+  const ihead = document.createElement('div'); ihead.className = 'pp-card-head';
+  ihead.innerHTML = '<span class="pp-card-name"></span>';
+  ihead.querySelector('.pp-card-name').textContent = t('pp_install_title');
+  inst.appendChild(ihead);
+  const idesc = document.createElement('div'); idesc.className = 'pp-card-desc';
+  idesc.textContent = t('pp_install_desc');
+  inst.appendChild(idesc);
+  const iurl = document.createElement('input');
+  iurl.type = 'url'; iurl.placeholder = t('pp_install_ph'); iurl.setAttribute('autocapitalize', 'off');
+  iurl.style.cssText = 'display:block;width:100%;margin:8px 0;padding:8px;border-radius:6px;background:#1e1e1e;color:#ddd;border:1px solid #444';
+  inst.appendChild(iurl);
+  const ifoot = document.createElement('div'); ifoot.className = 'pp-card-foot';
+  const ibtn = document.createElement('button'); ibtn.className = 'pp-btn pp-btn-primary';
+  ibtn.textContent = t('pp_install_btn');
+  ibtn.addEventListener('click', function () { installPluginFromUrl(iurl.value.trim()); });
+  ifoot.appendChild(ibtn);
+  inst.appendChild(ifoot);
+  body.appendChild(inst);
   const reserve = document.createElement('div'); reserve.className = 'pp-hint dim';
   reserve.textContent = t('pp_reserve');
   body.appendChild(reserve);
+}
+/** v5.9.0：从 HTTPS 链接安装插件。只负责下载与落盘，授权仍需用户在卡片上勾选权限。 */
+async function installPluginFromUrl(url) {
+  const u = String(url || '').trim();
+  if (!/^https:\/\/[^\s]+$/i.test(u)) { outAppend('⚠ ' + t('pp_install_bad_url') + '\n', 'out-err'); return false; }
+  if (!(window.Android && Android.writePlugin)) { outAppend(t('only_android') + '\n', 'out-err'); return false; }
+  let name = '';
+  try { name = decodeURIComponent((new URL(u)).pathname.split('/').pop() || ''); } catch (e) { name = ''; }
+  name = name.replace(/[^A-Za-z0-9_.-]/g, '_');
+  if (!/\.js$/i.test(name)) name = (name || 'plugin') + '.js';
+  let text = '';
+  const ctrl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+  const timer = setTimeout(function () { if (ctrl) ctrl.abort(); }, 25000);
+  try {
+    const r = await fetch(u, ctrl ? { signal: ctrl.signal, mode: 'cors' } : {});
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    text = await r.text();
+    if (text.length > 512 * 1024) throw new Error(t('pp_install_too_big'));
+  } catch (e) {
+    clearTimeout(timer);
+    outAppend('⚠ ' + t('pp_install_fail') + (e && e.message ? e.message : e) + '\n', 'out-err');
+    return false;
+  }
+  clearTimeout(timer);
+  let ok = false;
+  try { ok = Android.writePlugin(name, text); } catch (e) { ok = false; }
+  if (!ok) { outAppend('⚠ ' + t('pp_install_fail') + name + '\n', 'out-err'); return false; }
+  /* 刷新插件清单：新文件没有信任记录 → 卡片显示「待授权」 */
+  try {
+    if (Android.pluginInfo) {
+      const infos = JSON.parse(Android.pluginInfo()) || [];
+      pluginInfos.clear();
+      for (const it of infos) if (it && it.name) pluginInfos.set(it.name, it);
+      if (infos.some(function (x) { return x && x.name === name; })) {
+        PluginHost.blocked[name] = 'pending';
+        if (PluginHost.skipped.indexOf(name) < 0) PluginHost.skipped.push(name);
+      }
+    }
+  } catch (e) {}
+  outMeta(t('pp_install_ok').replace('{name}', name));
+  switchPluginTab('loaded');
+  return true;
 }
 $('mi-plugins').addEventListener('click', openPluginPage);
 $('pp-back').addEventListener('click', () => $('plugin-page').classList.add('hidden'));
@@ -2584,15 +4376,18 @@ function validName(name) {
   if (!extRe.test(name)) return t('bad_ext');
   return null;
 }
-function doNewFile() { showModal({ title: t('new_file'), placeholder: t('fname_eg') }); modalMode = 'new'; }
+let modalTarget = null;   // v5.7.0：重命名/删除的目标文件（不再借用 state.active，避免编辑中的文件被顶掉）
+function doNewFile() { showModal({ title: t('new_file'), placeholder: t('fname_eg') }); modalMode = 'new'; modalTarget = null; }
 function startRename(old) {
-  state.active = old;
+  modalTarget = old;
   showModal({ title: t('rename'), value: old, desc: '' });
   modalMode = 'rename';
 }
 function doDelete() {
-  if (!state.active) return;
-  showModal({ title: t('delete_q') + state.active + t('delete_q2'), withInput: false, okText: t('delete_btn'), desc: t('irreversible') });
+  const target = state.active;      // 删除始终作用于当前打开的文件
+  if (!target) return;
+  modalTarget = target;
+  showModal({ title: t('delete_q') + target + t('delete_q2'), withInput: false, okText: t('delete_btn'), desc: t('irreversible') });
   modalMode = 'confirm';
 }
 function modalOk() {
@@ -2600,20 +4395,44 @@ function modalOk() {
   if (modalMode === 'new') {
     const err = validName(name);
     if (err) { $('modal-error').textContent = err; return; }
-    state.files.push({ name, content: '' });
+    state.files.push({ name, content: '', _saved: '' });
     openFile(name); closeSidebar(); hideModal();
   } else if (modalMode === 'rename') {
-    const old = state.active;
+    const old = modalTarget || state.active;
     if (name === old) { hideModal(); return; }
     const err = validName(name);
     if (err) { $('modal-error').textContent = err; return; }
-    state.files.find(x => x.name === old).name = name;
-    state.active = name;
-    openFile(name); hideModal();
+    const target = state.files.find(x => x.name === old);
+    if (!target) { hideModal(); return; }
+    /* v5.6.0：重命名要迁移草稿键，并把磁盘签名置空（磁盘上仍是旧文件名）
+       v5.7.0：标签与视图状态同样迁移，否则切回来会找不到状态 */
+    const oldDraftKey = draftKey(old);
+    target.name = name;
+    target._sig = null;
+    const ti = tabList().indexOf(old);
+    if (ti >= 0) tabList()[ti] = name;
+    const vs = viewStates.get(old);
+    if (vs) { viewStates.delete(old); viewStates.set(name, vs); }
+    if (state.active === old) state.active = name;
+    if (projectMode()) {
+      DraftStore.del(oldDraftKey);
+      if (target.content !== null && target.content !== target._saved) DraftStore.put(draftKey(name), target.content);
+    }
+    if (state.active === name) openFile(name); else { renderTabs(); saveStore(); }
+    modalTarget = null;
+    hideModal();
   } else if (modalMode === 'confirm') {
-    state.files = state.files.filter(x => x.name !== state.active);
-    if (!state.files.length) state.files.push({ name: 'main.py', content: PY_DEFAULT_CODE });
-    openFile(state.files[0].name); hideModal();
+    const gone = modalTarget || state.active;
+    const wasActive = (gone === state.active);
+    state.files = state.files.filter(x => x.name !== gone);
+    if (projectMode()) DraftStore.del(draftKey(gone));   // v5.6.0：删除文件同时清理草稿
+    dropTab(gone);                                       // v5.7.0：标签一起关掉
+    if (!state.files.length) state.files.push({ name: 'main.py', content: PY_DEFAULT_CODE, _saved: PY_DEFAULT_CODE });
+    if (!tabList().length) state.tabs = [state.files[0].name];
+    if (wasActive || !state.files.some(f => f.name === state.active)) openFile(tabList()[0]);
+    else { renderTabs(); saveStore(); }
+    modalTarget = null;
+    hideModal();
   }
 }
 
@@ -2621,7 +4440,16 @@ function modalOk() {
 function exportFile() {
   const f = state.files.find(x => x.name === state.active);
   if (!f) return;
-  if (window.Android && Android.saveFileEx) { Android.saveFileEx(f.name.split('/').pop(), f.content, exportEncoding); outMeta('已导出 ' + f.name + '（' + exportEncoding + '）到下载文件夹'); return; }
+  if (f.content === null && !ensureContent(f)) { outAppend('导出失败：无法读取文件内容。\n', 'out-err'); return; }
+  if (window.Android && Android.saveFileEx) {
+    /* v5.4.3 修复（审查 #13）：不再无条件提示成功——文件名非法（旧白名单拒绝中文）、
+       编码不支持（ASCII 含中文）时原生会返回 false。 */
+    const ok = Android.saveFileEx(f.name.split('/').pop(), f.content, exportEncoding);
+    if (ok) outMeta('已导出 ' + f.name + '（' + exportEncoding + '）到下载文件夹');
+    else outAppend('导出失败：文件名不被接受或所选编码（' + exportEncoding + '）无法表示文件内容。'
+      + '可在菜单切换编码（如 UTF-8 / GBK）后重试。\n', 'out-err');
+    return;
+  }
   const blob = new Blob([f.content], { type: 'text/plain;charset=utf-8' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
@@ -2636,6 +4464,13 @@ function closeSidebar() { document.body.classList.remove('sidebar-open'); }
 $('btn-menu').addEventListener('click', () => document.body.classList.toggle('sidebar-open'));
 $('sidebar-mask').addEventListener('click', closeSidebar);
 $('btn-run').addEventListener('click', runCurrent);
+/* v5.10.0：编译 / 运行分离——用上次编译产物重跑（不再调用编译器） */
+if (typeof EditorAPI !== 'undefined' && EditorAPI && EditorAPI.registerCommand) {
+  EditorAPI.registerCommand('run.rerun', {
+    label: t('run_rerun'), labelKey: 'run_rerun', group: 'run',
+    run: function () { rerunCached(); return true; }
+  });
+}
 /* v5.4：设置页 → 编辑 → 壁纸 */
 (function bindWallpaper() {
   const b = $('mi-wallpaper');
@@ -2645,7 +4480,7 @@ $('btn-run').addEventListener('click', runCurrent);
 (function bindTitleSearch() {
   const box = $('title-search'), inp = $('title-search-input');
   if (!box) return;
-  const fire = (e) => { if (e) e.preventDefault(); openCommandPalette(''); };
+  const fire = (e) => { if (e) e.preventDefault(); openQuickSearch(); };   // v5.9.0：文件 / 符号 / 全文统一搜索
   box.addEventListener('mousedown', (e) => e.preventDefault());
   box.addEventListener('click', fire);
   if (inp) { inp.addEventListener('focus', (e) => { e.target.blur(); fire(); }); }
@@ -3029,6 +4864,11 @@ $('mi-open-folder') && $('mi-open-folder').addEventListener('click', () => {
   $('more-menu').classList.add('hidden');
   openProjectFolder();
 });
+/* v5.10.0：SAF 工作区——系统目录选择器授权，普通编辑不再依赖「所有文件访问」 */
+$('mi-open-saf') && $('mi-open-saf').addEventListener('click', () => {
+  $('more-menu').classList.add('hidden');
+  openSafWorkspace();
+});
 $('mi-open-file') && $('mi-open-file').addEventListener('click', () => {
   $('more-menu').classList.add('hidden');
   openLocalFile();
@@ -3094,6 +4934,24 @@ function setFontSize(v) {
   $('status-size').textContent = t('font') + ' ' + fontSize;
   saveStore();
 }
+/** v5.9.0：缩进宽度（空格数），2–8 */
+function setTabSize(v) {
+  tabSize = Math.max(2, Math.min(8, v));
+  if (cm) { try { PCCM.setTabSize(cm, tabSize); } catch (e) {} }
+  saveStore();
+}
+/** 控制面板用：从设置页的 <select> 取选项，切换时复用同一套 change 处理 */
+function engineOptions(selectId) {
+  const sel = $(selectId);
+  if (!sel) return [];
+  return [...sel.options].map(function (o) { return { value: o.value, label: o.textContent }; });
+}
+function setEngineValue(selectId, v) {
+  const sel = $(selectId);
+  if (!sel) return;
+  sel.value = v;
+  sel.dispatchEvent(new Event('change'));
+}
 
 const _modalOk = modalOk;
 $('modal-ok').addEventListener('click', () => {
@@ -3107,6 +4965,9 @@ $('modal-ok').addEventListener('click', () => {
       PluginHost.loaded = PluginHost.loaded.filter(x => x.__file !== file);
       PluginHost.skipped = (PluginHost.skipped || []).filter(x => x !== file);
       PluginHost.disabledBuiltin = (PluginHost.disabledBuiltin || []).filter(x => x !== file);
+      if (PluginHost.blocked) delete PluginHost.blocked[file];
+      pluginInfos.delete(file);
+      PluginTrust.revoke(file);     // v5.8.0：删除 = 撤销授权 + 删除私有副本
       setPluginDisabled(file, false);
       try { localStorage.setItem('pc_builtin_disabled', JSON.stringify(PluginHost.disabledBuiltin)); } catch (e) {}
       renderToolbar(); pcApplyExts();
@@ -3121,15 +4982,6 @@ $('modal-ok').addEventListener('click', () => {
     if (!file) return;
     SandboxHost.setSandbox(file, false);   /* 关闭沙箱 = 加入主线程白名单 */
     try { if (window.Android && Android.showToast) Android.showToast(t('pp_sandbox_restart')); } catch (e) {}
-    openPluginPage();
-    return;
-  }
-  if (modalMode === 'plugin-enable') {
-    hideModal();
-    const file = pendingPluginFile; pendingPluginFile = null;
-    if (!file) return;
-    setPluginDisabled(file, false);
-    try { if (window.Android && Android.showToast) Android.showToast(t('pp_toggle_restart')); } catch (e) {}
     openPluginPage();
     return;
   }
@@ -3157,26 +5009,126 @@ $('modal-mask').addEventListener('click', (e) => { if (e.target === $('modal-mas
 $('modal-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('modal-ok').click(); });
 
 /* ---------- 面板 ---------- */
+$('ptab-output') && $('ptab-output').addEventListener('click', function () { switchPanelTab('term'); });
+$('ptab-log') && $('ptab-log').addEventListener('click', function () { switchPanelTab('log'); });
+$('ptab-problems') && $('ptab-problems').addEventListener('click', function () { switchPanelTab('problems'); });
 $('btn-clear-out').addEventListener('click', outClear);
 $('btn-panel-toggle').addEventListener('click', () => {
   $('bottom-panel').classList.toggle('collapsed');
   setTimeout(() => cm && cm.requestMeasure(), 200);
 });
-$('tab-close').addEventListener('click', () => {
-  $('welcome').classList.remove('hidden');
-});
+/* v5.7.0：标签的关闭按钮改为 renderTabs() 内逐个绑定，这里不再固定绑 #tab-close */
+
+/* ============================================================
+ * v5.9.0：可配置键条（Esc / Tab / 方向键 / 符号）
+ * 数据存 localStorage：pc_keybar = 'on' | 'off'，pc_keybar_keys = ["(", ...]
+ * ============================================================ */
+const KEYBAR_DEFAULT = ['Esc', 'Tab', '←', '↑', '↓', '→', '(', ')', '[', ']', '{', '}', '<', '>', ':', '"', "'", '=', '+', '-', '*', '/', '#', '_', '.', ':'];
+function keybarEnabled() { return localStorage.getItem('pc_keybar') === 'on'; }
+function keybarKeys() {
+  try {
+    const v = JSON.parse(localStorage.getItem('pc_keybar_keys') || 'null');
+    if (Array.isArray(v) && v.length) return v;
+  } catch (e) {}
+  return KEYBAR_DEFAULT;
+}
+function setKeybarEnabled(on) {
+  try { localStorage.setItem('pc_keybar', on ? 'on' : 'off'); } catch (e) {}
+  renderKeybar();
+}
+function renderKeybar() {
+  const bar = $('keybar');
+  if (!bar) return;
+  const on = keybarEnabled();
+  bar.classList.toggle('hidden', !on);
+  if (!on) return;
+  bar.innerHTML = '';
+  keybarKeys().forEach(function (k) {
+    const b = document.createElement('button');
+    b.type = 'button'; b.className = 'kb-btn'; b.textContent = k;
+    b.addEventListener('mousedown', function (e) { e.preventDefault(); });   // 不抢编辑器焦点
+    b.addEventListener('click', function () { keybarPress(k); });
+    bar.appendChild(b);
+  });
+}
+function keybarPress(k) {
+  if (!cm) return;
+  if (k === 'Esc') { closePalette(); try { document.activeElement.blur(); } catch (e) {} return; }
+  if (k === 'Tab') {
+    const ok = EditorAPI.runCommand('edit.indentMore');
+    if (!ok) { try { cm.dispatch(cm.state.replaceSelection(' '.repeat(tabSize))); } catch (e) {} }
+    cm.focus(); return;
+  }
+  if (k === '←' || k === '→' || k === '↑' || k === '↓') {
+    const sel = cm.state.selection.main;
+    const doc = cm.state.doc;
+    const line = doc.lineAt(sel.head);
+    const col = sel.head - line.from;
+    let pos = sel.head;
+    if (k === '←') pos = Math.max(0, sel.head - 1);
+    else if (k === '→') pos = Math.min(doc.length, sel.head + 1);
+    else if (k === '↑' || k === '↓') {
+      const targetNo = line.number + (k === '↑' ? -1 : 1);
+      if (targetNo >= 1 && targetNo <= doc.lines) {
+        const tl = doc.line(targetNo);
+        pos = tl.from + Math.min(col, tl.length);   // 保持列位，短行夹到行尾
+      }
+    }
+    cm.dispatch({ selection: { anchor: pos }, scrollIntoView: true });
+    cm.focus(); return;
+  }
+  try { cm.dispatch(cm.state.replaceSelection(k)); } catch (e) {}
+  cm.focus();
+}
+
+/* v5.9.0：软键盘适配——用 visualViewport 算出键盘占位，收起时让出空间但不挡住输入行 */
+(function bindKeyboardInsets() {
+  const vv = window.visualViewport;
+  if (!vv) return;
+  const apply = function () {
+    const kb = Math.max(0, Math.round(window.innerHeight - (vv.height + vv.offsetTop)));
+    document.documentElement.style.setProperty('--kb', kb + 'px');
+    document.body.classList.toggle('kb-open', kb > 80);
+    if (kb <= 80) { try { cm && cm.requestMeasure(); } catch (e) {} }
+  };
+  vv.addEventListener('resize', apply);
+  vv.addEventListener('scroll', apply);
+  apply();
+})();
 
 /* ---------- 快捷键 ---------- */
 document.addEventListener('keydown', (e) => {
-  if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); runCurrent(); }
-  if ((e.ctrlKey || e.metaKey) && e.key === 's') { e.preventDefault(); saveStore(); outMeta('已保存 ✓'); }
+  const mod = e.ctrlKey || e.metaKey;
+  if (mod && e.key === 'Enter') { e.preventDefault(); runCurrent(); return; }
+  if (e.key === 'F5') { e.preventDefault(); runCurrent(); return; }
+  if (mod && (e.key === 's' || e.key === 'S')) { e.preventDefault(); saveStore(); outMeta('已保存 ✓'); return; }
+  /* v5.9.0：外接键盘常用快捷键 */
+  if (mod && !e.shiftKey && (e.key === 'p' || e.key === 'P')) { e.preventDefault(); openQuickSearch(); return; }
+  if (mod && e.shiftKey && (e.key === 'P' || e.key === 'p')) { e.preventDefault(); openCommandPalette(''); return; }
+  if (mod && (e.key === 'f' || e.key === 'F')) {
+    e.preventDefault();
+    if (window.PCPluginAPI && PCPluginAPI.nav) PCPluginAPI.nav.search('');
+    else openCommandPalette('nav.');
+    return;
+  }
+  if (mod && (e.key === 'b' || e.key === 'B')) { e.preventDefault(); document.body.classList.toggle('sidebar-open'); return; }
+  if (mod && (e.key === '`' || e.key === '\'')) { e.preventDefault(); $('bottom-panel').classList.toggle('collapsed'); return; }
+  if (mod && (e.key === '/' || e.key === '?')) { e.preventDefault(); EditorAPI.runCommand('line.comment'); return; }
 });
 
 /* ---------- 启动 ---------- */
+/* v5.7.0：退出 / 切后台前立即把工作区元数据落盘（saveWorkspaceMeta 有 500ms 合并窗口） */
+window.addEventListener('pagehide', () => { try { flushWorkspaceMeta(); } catch (e) {} });
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') { try { flushWorkspaceMeta(); } catch (e) {} }
+});
 (async function boot() {
   $('status-size').textContent = '字号 ' + fontSize;
   $('app-title').textContent = '轻码编辑器 v' + APP_VERSION;
   renderFileList();
+  renderTabs();     // v5.7.0：先按上次的标签集合出标签栏，编辑器就绪后 openFile 会再刷新
+  renderKeybar();   // v5.9.0：按用户设置显示常用键条
+  renderProblems(); // v5.9.0：问题面板（初始为空）
   updateCppStateUi();
   probeTermux();
   syncProjectMenu();
@@ -3190,6 +5142,9 @@ document.addEventListener('keydown', (e) => {
   }
   // v4.2 语言：已选过则应用（未选等启动页结束后再弹，首启启动页先以默认语言显示）
   if (LANG) applyLang();
+  /* v5.5.0：恢复上次工作区放在这里——与 Python 加载并行，不等 Termux 检测（那可能耗时 2 分钟）；
+     编辑器此时已就绪，readProject 回调回来即可直接填充文件列表。 */
+  try { restoreWorkspace(); } catch (e) { console.warn('[workspace] restore failed', e); }
   // v4.4 插件加载（/sdcard/QingCode/plugins/*.js；无存储权限或无插件时自动跳过）
   try { await loadBuiltinPlugins(); } catch (e) { console.warn('[builtin]', e); }
   try { await loadPlugins(); } catch (e) { console.warn('[plugins]', e); }

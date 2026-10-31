@@ -23,7 +23,7 @@
       <path d="M40 22 L50 32 L40 42" stroke="#fff" stroke-width="4.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
       <path d="M35 18 L29 46" stroke="#ffd166" stroke-width="4" fill="none" stroke-linecap="round"/>
     </svg>
-    <div class="splash-title"><b data-i18n="about_name">轻码编辑器 QingCode</b><span id="splash-ver">v5.4.2</span></div>
+    <div class="splash-title"><b data-i18n="about_name">轻码编辑器 QingCode</b><span id="splash-ver">v5.10.0</span></div>
     <div class="splash-group" id="splash-grp-py">
       <div class="splash-row"><span class="splash-eng" data-i18n="splash_eng_py">Python 引擎</span><span class="splash-pct" id="splash-py-pct">0%</span></div>
       <div class="splash-bar"><div id="splash-py-fill" style="width:4%"></div></div>
@@ -102,14 +102,13 @@
     <!-- 编辑器区 -->
     <div id="editor-pane">
       <div id="tabbar">
-        <div id="tab" class="tab active">
-          <svg id="tab-fileicon" viewBox="0 0 24 24" width="15" height="15"><path fill="currentColor" d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6z"/></svg>
-          <span id="tab-name">main.py</span>
-          <button id="tab-close" class="tab-x" title="关闭">×</button>
-        </div>
+        <!-- v5.7.0 多标签：标签由 renderTabs() 动态生成 -->
+        <div id="tabs"></div>
       </div>
       <div id="editor-toolbar" class="hidden"></div>
       <div id="editor-container"></div>
+      <!-- v5.9.0：可配置的常用键条（Esc / Tab / 方向键 / 符号） -->
+      <div id="keybar" class="hidden"></div>
       <div id="welcome" class="hidden">
         <div class="welcome-box" data-i18n-html="welcome">
           <h1>轻码编辑器</h1>
@@ -128,6 +127,8 @@
   <section id="bottom-panel">
     <div class="panel-tabs">
       <button id="ptab-output" class="ptab active" data-i18n="terminal">终端</button>
+      <button id="ptab-log" class="ptab" data-i18n="pn_log">输出</button>
+      <button id="ptab-problems" class="ptab" data-i18n="pn_problems">问题<span id="prob-count" class="ptab-badge hidden">0</span></button>
       <span class="panel-spacer"></span>
       <button id="btn-clear-out" class="mini-btn" data-i18n-title="t_clear" title="清空输出">
         <svg viewBox="0 0 24 24" width="15" height="15"><path fill="currentColor" d="M19 4h-3.5l-1-1h-5l-1 1H5v2h14V4M6 19a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2V7H6v12z"/></svg>
@@ -139,6 +140,9 @@
     <div id="output-view">
       <pre id="output-log"><span class="out-hint" data-i18n="out_hint">// 终端就绪。点击 ▶ 运行当前文件，程序请求输入时会弹窗或在下方输入。</span></pre>
     </div>
+    <!-- v5.9.0：输出（状态消息）与问题（诊断）独立面板 -->
+    <div id="panel-log" class="panel-pane hidden"><pre id="log-view"></pre></div>
+    <div id="panel-problems" class="panel-pane hidden"><div id="prob-list"></div></div>
     <div id="term-input-row">
       <span id="term-prompt">❯</span>
       <input id="term-input" data-i18n-ph="ph_term" placeholder="程序运行时可在此交互输入，回车发送" autocomplete="off" autocapitalize="off" spellcheck="false">
@@ -151,6 +155,8 @@
     <span id="status-lang">Python</span>
     <span class="status-sep">|</span>
     <span id="status-engine">Pyodide (WebAssembly)</span>
+    <span id="status-store" class="hidden"></span>
+    <span id="status-run" class="hidden"></span>
     <span class="status-flex"></span>
     <span id="status-cursor">Ln 1, Col 1</span>
     <span class="status-sep">|</span>
@@ -306,6 +312,7 @@
       </div>
       <div class="sp-panel" data-panel="file" hidden>
         <button id="mi-open-folder" data-i18n="mi_openfolder">📂 打开文件夹（项目空间）</button>
+        <button id="mi-open-saf" data-i18n="mi_opensaf">🔐 打开工作区（系统目录授权，无需全部文件权限）</button>
         <button id="mi-open-file" data-i18n="mi_openfile">📄 打开文件（本地）</button>
         <button id="mi-close-project" style="display:none" data-i18n="mi_closeproj">✖ 关闭项目空间</button>
         <button id="mi-save-all" style="display:none" data-i18n="mi_saveall">💾 保存全部到项目</button>

@@ -16,7 +16,7 @@
     'except SyntaxError as e:',
     '    out["ok"] = False',
     '    out["diagnostics"].append({"line": e.lineno or 1, "col": e.offset or 1, "severity": "error", "message": "SyntaxError: " + (e.msg or ""), "code": "syntax"})',
-    '    print(json.dumps(out)); raise SystemExit',
+    '    return out',
     '',
     'def _doc(n):',
     '    d = ast.get_docstring(n)',
@@ -123,7 +123,7 @@
     'out["defs"].sort(key=lambda d: d["line"])',
     'out["refs"].sort(key=lambda d: d["line"])',
     'out["diagnostics"].sort(key=lambda d: d["line"])',
-    'print(json.dumps(out))'
+    'return out'
   ].join("\n");
 
   /* ===== C++ 启发式分析 ===== */
@@ -190,24 +190,37 @@
       function T(k, d) { try { return (api.hasI18n && api.hasI18n(k)) ? api.t(k) : d; } catch (e) { return d; } }
       function view() { return E.view || null; }
       var cache = { text: null, res: null };
-      var lastDiagCount = -1;
+      var lastDiagSig = null;
 
       /* ---------- 分析入口 ---------- */
       function b64(s) { try { var b = new TextEncoder().encode(s); var bin = ""; for (var i = 0; i < b.length; i++) bin += String.fromCharCode(b[i]); return btoa(bin); } catch (e) { return ""; } }
-      async function analyze(force) {
-        var v = view();
-        if (!v) return null;
-        var text = v.state.doc.toString();
-        if (!force && cache.text === text && cache.res) return cache.res;
-        var lang = E.currentLanguage ? E.currentLanguage() : null;
+      /* 把 PY_SCRIPT 包成 def _ci_main(): 的函数体，靠返回值取 JSON（print 的返回值是 None）。
+         json 需在模块级导入：PY_SCRIPT 里的 import 处于函数作用域，末尾的 json.dumps 用不到。 */
+      function buildPySource(text) {
+        var body = PY_SCRIPT.map(function (l) { return l ? '    ' + l : l; }).join('\n');
+        var src = 'import json\ndef _ci_main():\n' + body + '\njson.dumps(_ci_main())\n';
+        return src.replace('__CI_B64__', JSON.stringify(b64(text)));
+      }
+      /* 把诊断同步到内核错误标记：优先宿主 setErrors（维护 currentErrs），否则退回 PCCM */
+      function applyDiagMarks(res) {
+        if (!res) return;
+        var v = view(); if (!v) return;
+        var errs = (res.diagnostics || []).filter(function (d) { return d.severity === 'error'; }).slice(0, 6)
+          .map(function (d) { return { line: d.line, col: d.col, message: d.message }; });
+        try {
+          if (E.setErrors) { if (errs.length) E.setErrors(errs); else if (E.clearErrors) E.clearErrors(); }
+          else if (errs.length && window.PCCM && PCCM.markErrors) PCCM.markErrors(v, errs);
+        } catch (e) {}
+      }
+      /* v5.9.0：真正的分析计算抽出来，既供 LanguageService 提供者调用，也作为无 LS 时的兜底 */
+      async function computeFull(text, lang) {
         var res = null;
         if (lang === 'python') {
           if (!api.pyEval) { res = { ok: false, defs: [], refs: [], calls: [], diagnostics: [{ line: 1, col: 1, severity: "error", message: T('ci_no_py', 'Python 运行时未就绪'), code: "no-runtime" }], lang: 'python' }; }
           else {
-            var code = PY_SCRIPT.replace('__CI_B64__', JSON.stringify(b64(text)));
-            var out = await api.pyEval(code);
-            if (out) {
-              try { res = JSON.parse(out); res.lang = 'python'; } catch (e) { res = null; }
+            var raw = await api.pyEval(buildPySource(text));
+            if (raw != null && String(raw).trim() !== '') {
+              try { res = JSON.parse(raw); res.lang = 'python'; } catch (e) { res = null; }
             }
             if (!res) res = { ok: false, defs: [], refs: [], calls: [], diagnostics: [{ line: 1, col: 1, severity: "error", message: T('ci_py_fail', 'Python 分析失败（运行时未就绪或超时）'), code: "runtime" }], lang: 'python' };
           }
@@ -217,10 +230,28 @@
           res = { ok: true, defs: [], refs: [], calls: [], diagnostics: [], lang: lang || 'text' };
         }
         res.defs = res.defs || []; res.refs = res.refs || []; res.calls = res.calls || []; res.diagnostics = res.diagnostics || [];
+        return res;
+      }
+      /* 通过 LanguageService 请求（带 documentUri / documentVersion / requestId）：
+         结果过期（版本已变或请求被取消）时返回 null，调用方必须丢弃。 */
+      async function analyze(force) {
+        var v = view();
+        if (!v) return null;
+        var text = v.state.doc.toString();
+        if (!force && cache.text === text && cache.res) return cache.res;
+        var lang = E.currentLanguage ? E.currentLanguage() : null;
+        var res = null;
+        if (LS) {
+          var r = await LS.request('analyze', lang, { text: text, lang: lang });
+          if (r && r.stale) return null;
+          if (r && r.ok && r.data) res = r.data;
+        }
+        if (!res) res = await computeFull(text, lang);
         cache = { text: text, res: res };
-        if (res.diagnostics.length !== lastDiagCount) {
-          lastDiagCount = res.diagnostics.length;
-          try { if (res.diagnostics.length) { var errs = res.diagnostics.filter(function (d) { return d.severity === 'error'; }); if (errs.length && window.PCCM && PCCM.markErrors) PCCM.markErrors(v, errs.slice(0, 6).map(function (d) { return { line: d.line, col: d.col, message: d.message }; })); } } catch (e) {}
+        var sig = res.diagnostics.map(function (d) { return d.line + ':' + d.code + ':' + d.severity + ':' + d.message; }).join('|');
+        if (sig !== lastDiagSig) {
+          lastDiagSig = sig;
+          applyDiagMarks(res);
         }
         return res;
       }
@@ -354,9 +385,7 @@
           analyze(false).then(function (res) {
             if (!res) return;
             render(tab, res, '', name);
-            if (res.diagnostics.length) {
-              try { if (window.PCCM && PCCM.markErrors) PCCM.markErrors(v, res.diagnostics.filter(function (d) { return d.severity === 'error'; }).slice(0, 6).map(function (d) { return { line: d.line, col: d.col, message: d.message }; })); } catch (e) {}
-            }
+            applyDiagMarks(res);
           });
           return true;
         };
@@ -387,6 +416,31 @@
         });
         return true;
       });
+      /* v5.9.0：向 LanguageService 注册提供者（标准 5 类 + 插件自用的 analyze） */
+      var LS = api.lsp || null;
+      if (LS && LS.register) {
+        var provider = {
+          analyze: function (ctx) { return computeFull(ctx.text, ctx.lang || (E.currentLanguage && E.currentLanguage())); },
+          diagnostics: function (ctx) { return computeFull(ctx.text, ctx.lang).then(function (r) { return r.diagnostics || []; }); },
+          documentSymbol: function (ctx) {
+            return computeFull(ctx.text, ctx.lang).then(function (r) {
+              return (r.defs || []).map(function (d) { return { name: d.name, kind: d.kind, line: d.line, col: d.col, type: d.type, doc: d.doc }; });
+            });
+          },
+          references: function (ctx) { return computeFull(ctx.text, ctx.lang).then(function (r) { return r.refs || []; }); },
+          definition: function (ctx) {
+            var n = String(ctx.name || '');
+            return computeFull(ctx.text, ctx.lang).then(function (r) {
+              return (r.defs || []).filter(function (d) { return d.name === n; })[0] || null;
+            });
+          },
+          /* 补全仍由宿主的静态表提供（api.getCompletion），这里保持协议完整 */
+          completion: function () { return []; }
+        };
+        LS.register('python', provider);
+        LS.register('cpp', provider);
+      }
+
       cmd('ci.analyze', 'ci_cmd_analyze', function () {
         var v = view(); if (!v) return false;
         analyze(true).then(function (res) {
