@@ -2,8 +2,6 @@
 
 **中文** · [English](README_EN.md)
 
-**中文** · [English](README_EN.md)
-
 安卓端轻量代码编辑器：**CodeMirror 6 + Pyodide（Python WASM）+ Termux Clang/GCC（真实 C++ 编译）**，WebView 壳完全离线运行，命令行直接构建 APK（**无需 Gradle / Android Studio**）。未配置 Termux 时 C++ 自动回退内置 JSCPP 教学解释器。
 
 **v5.0 当前亮点：编辑器插件化重构 —— 内核只保留文档 / 行号 / 撤销 / 高亮 / 错误标注，全部可选编辑能力改由「内置插件」装配（`cm6.js` 重打包 753KB，暴露 `PCCM.modules` 73 个模块 + 4 个插槽，插件增删即时生效）· PCPluginAPI 升到 v3（新增 `editor` 接口：扩展 / 命令 / 工具栏 / 语言 / 补全 / 片段 / 格式化 / 事件）· 内置插件「编辑增强」（27 条命令 + 9 个触屏工具栏按钮 + 命令面板 + 多光标模式 + 行操作 + 折叠 + 片段 + 格式化 + 补全迁移）· 高亮与运行解耦（js/json/html/css/md 可高亮）· 插件管理页可即时启停内置插件 · 插件文案全量中英 i18n。**
