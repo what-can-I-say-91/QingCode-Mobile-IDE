@@ -2,7 +2,6 @@
 
 **中文** · [English](README_EN.md)
 
-**中文** · [English](README_EN.md)
 
 安卓端轻量代码编辑器：**CodeMirror 6 + Pyodide（Python WASM）+ Termux Clang/GCC（真实 C++ 编译）**，WebView 壳完全离线运行，命令行直接构建 APK（**无需 Gradle / Android Studio**）。未配置 Termux 时 C++ 自动回退内置 JSCPP 教学解释器。
 
