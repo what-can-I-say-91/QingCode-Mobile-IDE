@@ -105,7 +105,12 @@ function injectFiles(files) {
   const FS = pyodide.FS;
   for (const f of files) {
     try {
-      const full = '/home/pyodide/' + String(f.name).split('/').pop();
+      /* v5.11.0：保留项目内相对路径（pkg/module.py），否则包结构在 Worker 里被拍平，
+         import pkg.module 会失败。与主线程 injectProjectToPyodide 的行为保持一致。
+         v5.11.1：拒绝 .. 段——文件名字段来自未再校验的外部输入，不能让它跳出注入根目录。 */
+      const rel = String(f.name).replace(/\\/g, '/').replace(/^\/+/, '');
+      if (!rel || rel.split('/').some(seg => seg === '' || seg === '.' || seg === '..')) continue;
+      const full = '/home/pyodide/' + rel;
       const dir = full.slice(0, full.lastIndexOf('/'));
       const parts = dir.split('/').filter(Boolean);
       let cur = '';

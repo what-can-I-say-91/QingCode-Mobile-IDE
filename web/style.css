@@ -55,7 +55,7 @@ body {
 #title-search-input::placeholder { color: #8a8f98; }
 #app-title { font-size: 15px; font-weight: 600; color: #e8e8e8; letter-spacing: .5px; }
 .icon-btn {
-  width: 38px; height: 38px; border: none; border-radius: var(--radius);
+  width: 40px; height: 40px; border: none; border-radius: var(--radius);
   background: transparent; color: var(--fg); cursor: pointer;
   display: flex; align-items: center; justify-content: center;
 }
@@ -85,7 +85,7 @@ body {
   padding: 0 10px; font-size: 12px; color: #bbb; text-transform: uppercase; letter-spacing: 1px;
 }
 .mini-btn {
-  width: 28px; height: 28px; border: none; border-radius: 4px;
+  width: 34px; height: 34px; border: none; border-radius: 4px;
   background: transparent; color: var(--fg-dim); cursor: pointer;
   display: inline-flex; align-items: center; justify-content: center;
 }
@@ -186,14 +186,18 @@ body {
 }
 #keybar::-webkit-scrollbar { height: 0; }
 .kb-btn {
-  flex: 0 0 auto; min-width: 34px; height: 30px; padding: 0 9px;
+  flex: 0 0 auto; min-width: 34px; height: 36px; padding: 0 9px;
   border-radius: 7px; border: 1px solid #4a4a4a; background: #262626; color: #ddd;
   font-size: 13px; cursor: pointer;
 }
 .kb-btn:active { background: #3a3a3a; }
-/* 软键盘弹出：收起终端滚动区，但保留输入行（input() 仍可用） */
+/* 软键盘弹出：收起终端滚动区，但保留输入行（input() 仍可用）
+   v5.11.0：面板高度真的跟着键盘让位——原来 --kb 算了却没人用，横屏+大键盘时面板会挤掉编辑区 */
 body.kb-open #output-view { display: none; }
-body.kb-open #bottom-panel { max-height: 96px; height: auto; flex-basis: auto; }
+body.kb-open #bottom-panel {
+  max-height: clamp(56px, calc(100vh - var(--kb, 0px) - 180px), 96px);
+  height: auto; flex-basis: auto;
+}
 /* 横屏 / 平板：侧栏与终端占比更合理 */
 @media (orientation: landscape) and (max-width: 900px) {
   #sidebar { width: 190px; flex-basis: 190px; }
@@ -624,7 +628,7 @@ body.term-live #term-prompt { animation: blink 1.2s infinite; }
 #editor-toolbar::-webkit-scrollbar { display: none; }
 #editor-toolbar.hidden { display: none; }
 .etb-btn {
-  flex: 0 0 auto; min-width: 34px; height: 30px; padding: 0 8px;
+  flex: 0 0 auto; min-width: 34px; height: 36px; padding: 0 8px;
   border: none; border-radius: 6px; background: transparent; color: #c9c9c9;
   font-size: 15px; line-height: 1; cursor: pointer;
 }
@@ -757,7 +761,7 @@ body.term-live #term-prompt { animation: blink 1.2s infinite; }
 /* v5.9.0：控制面板行内控件 */
 .cp-ico { flex: 0 0 auto; margin-right: 8px; font-size: 13px; opacity: .85; }
 .cp2-step { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; }
-.cp2-stepbtn { width: 26px; height: 26px; border: 1px solid #4a4a4a; border-radius: 6px; background: #2a2a2a; color: #ddd; font-size: 15px; line-height: 1; cursor: pointer; }
+.cp2-stepbtn { width: 32px; height: 32px; border: 1px solid #4a4a4a; border-radius: 6px; background: #2a2a2a; color: #ddd; font-size: 15px; line-height: 1; cursor: pointer; }
 .cp2-stepbtn:active { background: #3a3a3a; }
 .cp2-stepval { min-width: 34px; text-align: center; font-size: 12px; color: #cfe0ff; font-family: monospace; }
 .cp2-sel { flex: 0 0 auto; max-width: 46%; background: #262626; color: #ddd; border: 1px solid #4a4a4a; border-radius: 6px; padding: 4px 6px; font-size: 12px; }
@@ -826,3 +830,11 @@ body.term-live #term-prompt { animation: blink 1.2s infinite; }
 .wp-file input { display: none; }
 #wp-op { width: 100%; }
 .wp-clear { width: 100%; padding: 11px; border: 1px solid #a9483f; border-radius: 8px; background: rgba(169,72,63,.15); color: #f08b80; font-size: 13.5px; cursor: pointer; }
+
+/* v5.11.0：矮屏（横屏手机 / 分屏）压缩非编辑区，优先保证编辑高度 */
+@media (max-height: 480px) {
+  #titlebar { height: 40px; }
+  #statusbar { height: 20px; font-size: 11px; }
+  #keybar .kb-btn { height: 30px; }
+  #bottom-panel { flex-basis: 120px; height: 120px; max-height: 42vh; }
+}

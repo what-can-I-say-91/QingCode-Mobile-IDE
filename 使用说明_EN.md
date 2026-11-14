@@ -1,4 +1,4 @@
-# QingCode Editor v5.4.3 · User Guide
+# QingCode Editor v5.11.0 · User Guide
 
 **[中文](使用说明.md) · English**
 
@@ -8,7 +8,7 @@ A lightweight code editor for Android with a VSCode-style interface, built-in **
 
 ## 1. Installation
 
-Copy `轻码编辑器-QingCode-v5.4.2.apk` to the phone and install.
+Copy `轻码编辑器-QingCode-v5.11.0.apk` to the phone and install.
 
 > **First launch** shows the language dialog: "中文" / "English" — the choice is remembered; switch anytime from "**Settings → General → 🌐 语言 / Language**".
 

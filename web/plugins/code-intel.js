@@ -238,8 +238,11 @@
         var v = view();
         if (!v) return null;
         var text = v.state.doc.toString();
-        if (!force && cache.text === text && cache.res) return cache.res;
         var lang = E.currentLanguage ? E.currentLanguage() : null;
+        var uri = (E.documentUri && E.documentUri()) || '';
+        /* v5.11.0：缓存键加语言与文件标识。原来只比文本——两个内容相同但语言不同的文件
+           （例如空模板、同名结构）会直接复用另一个语言的分析结果。 */
+        if (!force && cache.text === text && cache.lang === lang && cache.uri === uri && cache.res) return cache.res;
         var res = null;
         if (LS) {
           var r = await LS.request('analyze', lang, { text: text, lang: lang });
@@ -247,7 +250,7 @@
           if (r && r.ok && r.data) res = r.data;
         }
         if (!res) res = await computeFull(text, lang);
-        cache = { text: text, res: res };
+        cache = { text: text, res: res, lang: lang, uri: uri };
         var sig = res.diagnostics.map(function (d) { return d.line + ':' + d.code + ':' + d.severity + ':' + d.message; }).join('|');
         if (sig !== lastDiagSig) {
           lastDiagSig = sig;

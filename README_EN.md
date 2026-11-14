@@ -1,4 +1,4 @@
-# QingCode Editor v5.10.0 · Source Guide
+# QingCode Editor v5.11.0 · Source Guide
 
 **[中文](README.md) · English**
 
@@ -43,7 +43,7 @@ A lightweight Android code editor: **CodeMirror 6 + Pyodide (Python WASM) + Term
 
 ## Download APK
 
-Grab the latest `轻码编辑器-QingCode-v5.10.0.apk` from [Releases](../../releases) (see the version table below for history).The full user guide: [使用说明_EN.md](使用说明_EN.md) (English) / [使用说明.md](使用说明.md) (Chinese).
+Grab the latest `轻码编辑器-QingCode-v5.11.0.apk` from [Releases](../../releases) (see [CHANGELOG_EN.md](CHANGELOG_EN.md) for the full history). The full user guide: [使用说明_EN.md](使用说明_EN.md) (English) / [使用说明.md](使用说明.md) (Chinese).
 
 ## Architecture
 
@@ -89,11 +89,11 @@ QingCode-源码/
 ├── debug.keystore              # local debug signing key (excluded by .gitignore; auto-generated when missing, password in build.sh)
 ├── LICENSE                     # MIT license (standard English text)
 ├── README.md / README_EN.md    # This file: features, architecture, layout, mechanics, build & extending
-├── CHANGELOG.md / CHANGELOG_EN.md # Full version history (51 releases + recent details)
+├── CHANGELOG.md / CHANGELOG_EN.md # Full version history & release table (plus recent details)
 ├── 使用说明.md                  # Full user guide (install / config / FAQ, Chinese)
-├── tests/e2e/                  # Front-end interaction tests (headless browser + CDP, 44 assertions)
 ├── 使用说明_EN.md               # User guide in English (mirrors the Chinese edition)
-├── TODO.md                     # Roadmap & backlog (staged, with milestone acceptance criteria)
+├── DEVELOPMENT.md              # Engineering guide: architecture, bridge rules, testing, performance, release flow, pitfalls (Chinese)
+├── tests/e2e/                  # Regression: e2e-core(13) + e2e-security(13) + termux-quoting(6) = 32 checks
 ├── .gitignore                  # for GitHub upload (Android template + build outputs)
 ```
 
@@ -145,13 +145,15 @@ cd web && python3 -m http.server 8899
 
 # Build APK
 ANDROID_SDK_ROOT=/opt/android-sdk ./build.sh
-# Output: build/QingCode.apk (versionName 5.10.0 / versionCode 59)
+# Output: build/QingCode.apk (versionName 5.11.0 / versionCode 61)
 ```
 
 Requirements: JDK 11+, Android SDK (build-tools;34.0.0, platforms;android-34). First build auto-generates `debug.keystore` (password hardcoded in build.sh).
 Project paths containing **spaces or non-ASCII characters** also build directly — `build.sh` invokes `aapt2` with relative paths (d8 / zipalign / apksigner have no such problem).
 
 ## Development Guide
+
+Full engineering notes (architecture, build, native bridge rules, testing, performance guidelines, release flow, pitfalls) live in **[DEVELOPMENT.md](DEVELOPMENT.md)** (Chinese).
 
 | What to change | Where |
 |---|---|
@@ -163,7 +165,7 @@ Project paths containing **spaces or non-ASCII characters** also build directly 
 | Streaming poll interval | `MainActivity.java` 200 ms handler |
 | Timeout duration | frontend `Android.runCpp(…, 60)` and `timeout 50` inside the Termux script |
 | C++ sample code | `CPP_DEFAULT_CODE` (STL interactive) / `CPP_JSCPP_CODE` (fallback-compatible) at the top of `web/app.js` |
-| App name / version | `AndroidManifest.xml` (currently versionCode 59 / versionName 5.10.0) + `web/app.js` `APP_VERSION` |
+| App name / version | `AndroidManifest.xml` (currently versionCode 61 / versionName 5.11.0) + `web/app.js` `APP_VERSION` |
 | Built-in plugin / edit commands | `web/plugins/editor-plus.js` (commands / toolbar / snippets / formatting), registered through `PCPluginAPI.v3`'s `editor` interface |
 | Plugin extension surface | `EditorAPI` in `web/app.js` (extension / command / toolbar / language / completion / snippets / formatter / events) + `PCCM.modules` |
 | Bilingual UI strings | `web/i18n.js` dictionary (driven by `data-i18n*` attributes); add attributes + bilingual keys for new UI elements |
@@ -185,8 +187,11 @@ npm pack JSCPP@2.0.9 && npx esbuild lib/commonjs.js --bundle --global-name=JSCPP
 
 - **Signing key**: the local `debug.keystore` is for debugging only and its password is public; it is listed in `.gitignore` (not shipped with the repo — a fresh clone generates its own on first build, which yields a different signature, so a clean install is required to overwrite an existing APK). **Release builds must use a private key**:
   `KEYSTORE=/path/to/release.jks KEYSTORE_PASS=... ./build.sh`; anything signed with the debug key is for personal use only.
-- **Third-party plugins**: a **newly appeared** file under `/sdcard/QingCode/plugins/` is **disabled by default** and must be confirmed in the plugin manager; **plugins run in a "🧪 sandbox" by default** (no DOM / native bridge / local storage, but **network access remains**). A fully trusted plugin can be moved to the main thread via "**Trust & run on main thread**" on its "🧪 running in sandbox" card (second confirmation, takes effect after restarting the app).
-- **Online compilers**: the default C++ engine is JSCPP (local, no upload); code is only sent to Wandbox/Judge0 when you explicitly pick "Online".
+- **Third-party plugins**: a **newly appeared** file under `/sdcard/QingCode/plugins/` is **disabled by default** and must be confirmed in the plugin manager; approval checks the content hash, and **no permissions are granted by default** — tick only what the plugin needs.
+  **Plugins run in a "🧪 sandbox" by default**: the Worker has no DOM / native bridge / storage, and its response carries `Content-Security-Policy: connect-src 'none'`, so **the sandbox has no network access either**.
+  A plugin moved to the main thread with "Trust & run on main thread" is **not permission-scoped** — it can call the native bridge directly (Termux, file I/O). The plugin manager shows a permanent notice about this; only do it for sources you fully trust.
+- **Termux channel**: to let this app submit commands, Termux must have `allow-external-apps=true`. Once enabled, **any app holding the `RUN_COMMAND` permission can execute commands in Termux**, not just this one — that is how Termux works, not something this app can narrow. This app asks for a native confirmation (showing the first 200 characters of the command) **before the first execution in each session**, and does nothing if you decline.
+- **Online compilers (off by default)**: the default C++ engine is JSCPP (local, no upload); your code is sent to Wandbox/Judge0 only when you explicitly pick "Online" — that is an outbound transfer, so avoid it for code you cannot disclose.
 - **Path validation**: the native bridge whitelists plugin/file names and canonicalises project paths, rejecting out-of-root paths; external links are handed to the system for http/https/mailto only.
 
 ## Versioning
@@ -201,4 +206,4 @@ npm pack JSCPP@2.0.9 && npx esbuild lib/commonjs.js --bundle --global-name=JSCPP
 
 > Past releases are never modified: historical APKs keep their original filenames and new versions ship under new names (the source directory always holds the latest; history lives in this table).
 
-**The full version history (51 releases) lives in [CHANGELOG_EN.md](CHANGELOG_EN.md).**
+**The full history and release table live in [CHANGELOG_EN.md](CHANGELOG_EN.md).**

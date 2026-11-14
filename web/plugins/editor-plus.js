@@ -100,19 +100,45 @@
       }
       E.registerCommand('cursor.mode', { label: T('ep_cursorMode', '多光标模式'), group: 'cursor', run: function () { setMcMode(!mcMode); return true; } });
       if (M.EditorView && M.EditorSelection) {
+        /* v5.11.0：改用 Pointer Events（触摸与鼠标统一）。原来只监听 mousedown，
+           移动端要靠 WebView 合成鼠标事件，行为不稳定。
+           v5.11.1：pointerdown 只记录起点并阻止 CM 折叠多光标选区，真正的「加光标」
+           放到 pointerup 且位移 ≤8px 时执行——否则每次滑动都会被当成一次点击，
+           手指划一下加好几个光标。 */
+        var mcDown = null;
+        var addCursorAt = function (e, v) {
+          var pos = v.posAtCoords({ x: e.clientX, y: e.clientY });
+          if (pos == null) return false;
+          var ranges = v.state.selection.ranges.slice();
+          var hit = -1;
+          for (var i = 0; i < ranges.length; i++) if (ranges[i].head === pos) { hit = i; break; }
+          if (hit >= 0 && ranges.length > 1) ranges.splice(hit, 1);
+          else ranges.push(M.EditorSelection.cursor(pos));
+          v.dispatch({ selection: M.EditorSelection.create(ranges) });
+          return true;
+        };
+        var mcHandler = function (e, v) {
+          if (!mcMode) return false;
+          if (e.button != null && e.button !== 0) return false;
+          return addCursorAt(e, v);
+        };
         E.addExtension(M.EditorView.domEventHandlers({
-          mousedown: function (e, v) {
-            if (!mcMode || e.button !== 0) return false;
-            var pos = v.posAtCoords({ x: e.clientX, y: e.clientY });
-            if (pos == null) return false;
-            var ranges = v.state.selection.ranges.slice();
-            var hit = -1;
-            for (var i = 0; i < ranges.length; i++) if (ranges[i].head === pos) { hit = i; break; }
-            if (hit >= 0 && ranges.length > 1) ranges.splice(hit, 1);
-            else ranges.push(M.EditorSelection.cursor(pos));
-            v.dispatch({ selection: M.EditorSelection.create(ranges) });
-            return true;
-          }
+          pointerdown: function (e, v) {
+            if (!mcMode) return false;
+            if (e.button != null && e.button !== 0) return false;
+            mcDown = { x: e.clientX, y: e.clientY };
+            return true;      // 阻止默认：保住已有的多光标选区（否则点击会被折叠成一个）
+          },
+          pointerup: function (e, v) {
+            if (!mcMode || !mcDown) return false;
+            var d = mcDown; mcDown = null;
+            // 位移过大视为滚动意图，不加光标（多光标模式下滚动请用双指）
+            if (Math.abs(e.clientX - d.x) > 8 || Math.abs(e.clientY - d.y) > 8) return false;
+            return addCursorAt(e, v);
+          },
+          pointercancel: function () { mcDown = null; return false; },
+          // 老 WebView 没有 PointerEvent 时退回鼠标事件（有 PointerEvent 就不再重复处理）
+          mousedown: function (e, v) { return (window.PointerEvent ? false : mcHandler(e, v)); }
         }));
       }
 

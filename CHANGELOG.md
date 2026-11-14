@@ -6,6 +6,94 @@
 
 ## 近期版本详情（v5.x）
 
+### v5.11.0 更新内容（y 级 · 移动 IDE 核心能力与稳定性）
+
+这一版不换架构，全部是在现有 WebView + 原生桥 + Termux 通道上补齐核心能力与修正真实缺陷。
+
+**正确性与数据安全**
+
+1. **项目配置真正生效**：`.qingcode.json` 此前被「跳过隐藏文件」规则排除，普通目录与 SAF 都读不到；现只在项目根层放行这一个文件。
+2. **SAF 工作区恢复外部修改检测**：`statFile` 补上 SAF 分支。此前 SAF 下签名恒为空，`sigOf()` 返回 null 后冲突检测被整段跳过。
+3. **关闭项目不再丢草稿**：有未保存改动时先弹「保存并关闭」，保存失败留在弹窗；只有确认保存成功才清理草稿。
+4. **项目内重命名 / 删除真正落盘**：新增 `renameProjectEntry` / `deleteProjectEntry`（普通路径 + SAF），失败时保持原状态，不会出现「界面没了、磁盘还在」。
+5. **Pyodide 项目运行补齐惰性文件**：只加载了大项目部分文件时先按需读取，读不到的明确列出；Worker 注入保留相对路径，`pkg/module.py` 这类包结构可以正常 import。
+6. **编译错误带文件身份**：多源项目里其它 `.cpp` 的报错不再按行号标到当前文件；问题面板显示文件名，点击先切到对应文件再跳行。路径含空格也能解析。
+
+**性能**
+
+7. **大文件模式真正生效**：超过 800KB 关闭语法高亮，并在输出区提示原因（此前只有判定函数、没有调用点）。
+8. **日志面板改增量追加**：不再每条消息把 500 行整体重写一遍。
+9. **全局搜索补读改分片**：每片 8 个文件，片间让出事件循环，打开搜索面板不再同步阻塞主线程。
+10. **原生增量读取单次上限 64KB**：失控输出时不再一次性分配几十 MB；`.app.log` 超过 1MB 自动轮转。
+11. **在线提交 base64 分块编码**：大源码不再把整个字节数组展开成函数参数。
+
+**触控与小屏**
+
+12. **触控目标放大**：顶栏 38→40、侧栏 28→34、键条与编辑工具栏 30→36、步进按钮 26→32。
+13. **键盘高度真正参与布局**：`--kb` 此前算了没用，现在底部面板高度会随键盘收缩，横屏大键盘不再挤掉编辑区。
+14. **新增矮屏适配**：横屏手机 / 分屏（高 ≤480px）压缩顶栏、状态栏与输出面板。
+15. **多光标改用 Pointer Events**：触摸与鼠标统一处理，老 WebView 无 PointerEvent 时回退鼠标事件。
+
+**工程**
+
+16. `tests/e2e/run.sh` 的 all 现在同时跑 `.sh` 用例（此前只发现 `.mjs`）；新增 `e2e-core.mjs`（9 项）。
+17. 清理过期的「尚未覆盖…」注释，同步文档版本与片段说明。
+
+**发布前全面自查（又修了一轮真实缺陷）**
+
+18. **全局替换会写坏未加载文件**：惰性文件的 `content` 是 `null`，`String(null)` 得到 `"null"`，只要正则能命中 `l/u/n` 就会把它当成正文写回并自动保存，真实文件被覆盖。替换与预览都跳过未加载文件，`setFileContent` 对 `content === null` 直接拒绝。
+19. **运行输出尾部丢失**：单次读盘改成 64KB 后，「看到退出码就停止轮询并删会话目录」会把还没读的尾部一起删掉（短时间打印 >64KB 后退出必现）。结束前先排空 stdout/stderr（上限 4MB），超时与编译失败分支同样处理。
+20. **子目录里的文件改不了名**：文件名校验拒绝 `/`，又不带目录传给原生桥，两条路都是死路。改为只改文件名、目录保持不变。
+21. **问题面板点一次就空**：`openFile()` 无条件 `clearCodeErrors()` 会清空问题列表，跨文件跳转只能成功一次。切完文件恢复列表，跳转失败时才不跳。
+22. **同名文件错误互标**：按 basename 兜底会把 `b/util.cpp` 的错误标到 `a/util.cpp`。只有全项目唯一同名时才允许兜底。
+23. **分片补读退化**：只有 `ensureContent` 成功才计数，遇到读失败或预算跳过会一口气读完剩余文件。改为按尝试次数分片。
+24. **多光标模式滑动误加光标**：`pointerdown` 直接加光标，滑一下加好几个。改为按下只记起点、抬起且位移 ≤8px 才加。
+25. 其他：未加载文件不参与搜索预览与书签预览；Pyodide 注入拒绝 `..` 段；日志单条上限 8KB；取消弹窗复位 `modalMode`；删除非活动文件后刷新侧栏；SAF 目录深度 8→16；`.app.log` 轮转加锁并检查结果；UTF-8 半字符不再卡住轮询；编译错误去重键带文件名。
+26. **测试启动器不再「假绿」**：浏览器 profile 每次唯一、CDP 端口必须干净、node 必须真的产出 `== … ==` 汇总行，否则判失败；三套前端用例各加 120 秒看门狗，防止 CDP 目标失效时 promise 永挂、进程静默退出（退出码 0 却什么都没跑）。
+
+### v5.10.1 更新内容（z 级 · 安全审查修复 12 项）
+
+按外部安全审查报告（main @63f277d）逐项修复。**这一版有若干行为变化，升级前请先看「行为变化」一节。**
+
+**P0（严重）**
+
+1. **插件权限不再默认给网络与工作区**：新插件默认全不授予；旧记录迁移也改成最小权限（需在插件管理页重新勾选）。
+2. **主线程插件的权限勾选改成只读提示**：它能直接调用原生桥，勾选框只会造成「已隔离」的错觉，因此明确写出「不受权限约束」。
+3. **Termux 命令执行前必须确认**：原生层弹框显示命令前 200 字，拒绝或超时即不执行；每个会话确认一次。后台环境检测改走**固定探针**（无参数），不会在启动时弹窗。
+4. **写入插件目录被原生拒绝**：`writeProjectFile` 现在拦住 `/sdcard/QingCode/plugins/`，该目录只能经「安装插件」写入。
+5. **加了 CSP**：`object-src 'none'`、`base-uri 'none'`、`connect-src` 只放行本体与 Wandbox / Judge0；保留 `'unsafe-eval'`（插件）与 `'wasm-unsafe-eval'`（Pyodide）。
+6. **沙箱 Worker 断网**：`sandbox-worker.js` 的响应头加 `Content-Security-Policy: connect-src 'none'`，插件在沙箱里再也传不出内容。
+7. **插件加载消除 TOCTOU**：新增 `readPluginVerified` / `readPluginCopyVerified`，内容与哈希来自同一次读取；与批准记录不一致一律拒绝执行。
+8. **主线程 Python 不再静默回退**：缺少跨域隔离时拒绝运行（那种模式下 `import js` 能直接调原生桥），提示改用 Termux / 在线引擎。
+
+**P1（重要）**
+
+9. `runCppEx` 改用校验后的相对路径写盘，并确认规范化路径仍在会话目录内。
+10. `.qingcode.json` 加固：`compiler` 只允许可执行名（禁止 `/` 与 `..`）；`env` 拒绝 `LD_PRELOAD` / `LD_LIBRARY_PATH` / `LD_AUDIT` / `PATH`；**首次运行带配置的项目会弹确认**，按「项目 + 配置指纹」记住选择，配置一改会重新确认。
+11. Termux 脚本先把会话源码整份复制到应用私有目录 `$HOME/.pc_work/<session>`，**哈希与编译都只针对私有副本**，共享存储被别的应用篡改也不再影响编译输入。
+12. 在线安装插件：下载完成后先显示 **SHA-256 指纹 + 源码前 50 行**，用户二次确认后才写入插件目录。
+
+**P2（说明与构建）**
+
+13. README 补两条：Termux 开启 `allow-external-apps=true` 后，**任何持有 `RUN_COMMAND` 权限的应用都能在 Termux 执行命令**（不只本应用）；在线编译属于代码外发，默认关闭。
+14. `build.sh`：可选文件（`TODO.md` 等）不存在时不再中断打包；**`RELEASE=1` 且使用 `debug.keystore` 时直接拒绝出包**。
+
+**行为变化（升级需知）**
+
+- 之前靠「默认授权」运行的第三方插件，升级后会变成**未授权**，需要重新勾选权限；主线程插件只需重新点一次「授权」。
+- 首次运行带 `.qingcode.json` 的项目会多一次确认框（同一配置只问一次）。
+- 每次启动首次使用 Termux 编译/运行时会弹一次命令确认。
+- 缺少跨域隔离的环境下，内置 Python 会被拒绝执行（原来会静默用主线程模式）。
+
+**验证**
+
+- 新增 `tests/e2e/e2e-security.mjs`（13 项）：CSP 生效后应用仍能启动、权限默认值、主线程只读提示、哈希不一致拒绝执行、配置加固与首次确认、安装二次确认。
+- 新增 `tests/e2e/termux-quoting.sh`（6 项）：校验生成脚本里几种引号拼接在 shell 中确实成立（含中文与空格路径）。
+- 构建通过，`versionCode 60 / 5.10.1`。**SAF 与 Termux 真实通道仍需真机验证。**
+
+- versionCode：5.10.1 (60)。
+
+
 ### v5.10.0 更新内容（y 级 · SAF 工作区 + 构建/执行拆分）
 
 路线图最后两段基础能力落地：工作区改用系统目录授权，编译与运行彻底拆开。
@@ -284,33 +372,8 @@
 
 | 版本 | 级别 | 主要变更 |
 |---|---|---|
-| **v1.0** | x（初版） | Monaco + Pyodide + JSCPP，WebView 壳，命令行构建 |
-| **v2.0** | x（换编辑器/编译器） | 编辑器换 CodeMirror 6，C++ 换 Termux 真实编译，JSCPP 降为兜底 |
-| **v3.0** | x（交互重构） | **交互式 I/O（对话框/终端输入行/流式输出）、启动提速（预加载+缓存头+md5 编译缓存）、依赖自动安装 + 环境向导** |
-| **v3.0.1** | z（细节优化） | **「获取 Termux」双选项对话框**（GitHub 下载 / 复制开发者邮箱 19587486395@163.com）；新增 `copyText` 原生桥；versionCode 4。签名密钥自此固定于 `debug.keystore`（口令见 build.sh） |
-| **v3.0.2** | z（细节优化） | **存储权限自动引导**：重新检测 / 运行 C++ 时若 Termux 已装但交换目录不可写，自动弹转系统「所有文件访问」设置页（此前 `openAllFilesAccess` 桥无前端入口，会静默降级 JSCPP）；versionCode 5 |
-| **v3.0.3** | z（细节优化） | **初始化指引化**：「环境向导 ②」改为先弹 4 步指引对话框（不再直接跳 Termux）：清华源切换命令（仅展示，长按手动复制，不进一键复制）→ 复制初始化命令 → 粘贴执行 → **(y/n) 输入 y 确认** 提示；权限请求前先弹说明对话框（「前往设置开启」确认后才跳系统设置页）；versionCode 6 |
-| **v3.0.4** | z（细节优化） | **运行链路可观测**：点运行后立即输出「已发送编译请求」，每 10s 心跳显示等待时长；超时 stderr 改为 4 步诊断清单（Termux 错误通知 / 通知权限 / 冷重启 / 终端直跑绕行）；versionCode 7 |
-| **v3.0.5** | z（细节优化） | **修复 setup 判定不一致**：运行前 `ensureStorageAccess` 与环境检测统一为「实际写入测试」为准（此前运行额外强制 `isExternalStorageManager`，与检测绿灯矛盾导致误拦）；`cppJson` 补 `message` 字段，setup 失败真实原因（被吞 → 恒显示「Termux 未就绪」）可透传到终端；失败涉及权限时自动弹「前往设置开启」引导；versionCode 8 |
-| **v3.1** | y（新增日志功能） | **调试日志系统**：原生关键路径全量落日志（getEnv/权限状态/写文件/`startService` 返回值/轮询退出码/超时，内存环形 500 条 + `/sdcard/QingCode/.app.log` 文件）；Termux 侧脚本执行留痕（`.termux.log`，轮询增量透出 `[termux]` 前缀）；菜单新增「导出调试日志（排障）」一键输出+复制；新增 `getLogs`/`appendLog` 桥；versionCode 9 |
-| **v3.1.1** | z（细节优化） | **修复 SecurityException 根因**：日志实证 `RUN_COMMAND` 为 dangerous 级自定义权限，仅 manifest 声明不够——`runCpp`/`runInTermuxTerminal` 前增加运行时 `requestPermissions` 授权（未授权时弹系统窗口并提示，批准后重试即可）；日志导出增加「保存到下载文件夹」（`Downloads/QingCode-日志-<时间戳>.log`，`exportLogs` 桥）；versionCode 10 |
-| **v3.1.2** | z（细节优化） | **轮询快照排障增强**：编译/运行轮询每 5s 在日志中记录 `poll#N` 文件快照（交换目录产物大小与 `.termux.log` 增量偏移），Termux 侧 start/end 留痕；`cppJson` 透出真实 stderr 原因；versionCode 11 |
-| **v3.2** | y（新增在线编译引擎） | **C++/Python 各加免费在线引擎（Wandbox 主 + Judge0 CE 备，双引擎自动兜底）**：无需 Termux 即可真实编译运行，运行前检测输入语句预填 stdin（一次性提交，不支持逐步交互）；**引擎切换改下拉菜单**（C++ 引擎 auto/Termux/在线/JSCPP、编译器 clang++/g++、Python 引擎 Pyodide/在线，选择持久化并即时提示）；**修复「关于」双按钮**：对话框加 `showCancel` 控制，纯信息对话框（关于/Termux 指引）只显示「关闭」且确定后直接收起（此前残留上一次 modalMode 误入文件名校验分支，导致「取消+关闭」同时出现且关闭报「请输入文件名」）；versionCode 12 |
-| **v3.3** | y（关于改版 + 源码随应用分发） | **「关于」全新改版**：logo + 版本号 + 三个选项卡（**用户协议** / **使用项目及致谢**（CodeMirror 6、Pyodide、JSCPP、Wandbox、Judge0、Termux）/ **开发者信息及开源协议**（开发者冯隽熙；采用 **MIT License**，随源码附 LICENSE 文件））；**源代码随应用分发**：构建时打包到 `assets/source/`（排除 Pyodide 二进制），启动/授权后自动释放到 **`/sdcard/QingCode/源码/`**（`.version` 标记按版本增量更新），「关于」底部告知释放路径与状态（新增 `sourcesReady` 桥）；versionCode 13 |
-| **v3.4** | y（编译错误可视化标注） | **编译/运行错误直接标进编辑器**：错误输出解析（GCC/Clang `file:line:col: error:` 与 Python Traceback 最后帧）→ **整行问题代码红色高亮**（红底 + 左侧红边条）+ **错误语法/函数下红色波浪线**（自动圈选所在单词）+ **错误处文字泡显示原因**（5 秒自动消失，光标自动滚动定位到错误处）；覆盖全部引擎：Termux 编译失败、在线 C++ 编译错误、内置 Pyodide 异常、在线 Python Traceback（每处最多标 6 个，运行/切文件自动清除）；实现：`cm6.js` bundle 内注入 `StateEffect`/`StateField`/`Decoration` 错误标注模块并暴露 `PCCM.markErrors/clearErrors`；versionCode 14 |
-| **v4.0** | x（全面升级 · 四大功能） | **① 智能补全**：输入实时弹出候选浮层（120ms debounce），三类场景——标准语法/关键词补全（`pri`→`print(`）、**已成功导入库的成员补全**（`import math` 后 `math.`→sin/cos/sqrt… 共 20 项；`#include <cmath>` 后 `std::` 补全；import/from/#include 正则扫描已导入库）、头文件名补全（`#include <`→25 个常用头）；↑↓ 选择 / Tab 或 Enter 采纳 / Esc 关闭，capture 阶段键盘拦截不影响正常编辑；**② 项目空间**：菜单「打开文件夹」原生目录浏览器（`CountDownLatch` + `AlertDialog` + `ListView`）选定后递归载入全部代码文件（≤200 个/个≤1MB）为项目，文件树显示相对路径、标题栏进入项目模式、**Python `import` 项目内模块自动生效**（运行前 Pyodide `FS.writeFile` 注入虚拟 FS / Termux 头文件写入交换目录）、**每 30 秒自动保存**全部修改回原路径；**③ 保存编码可选**：菜单编码下拉（UTF-8 / UTF-8 BOM / UTF-16LE / UTF-16BE / **GBK** / ASCII），「导出」按所选编码写文件（原生 `encodeBytes` 六编码），读取智能检测（BOM 优先 → UTF-8 严格解码 → GBK 回退，中文不乱码）；**④ 应用内 Termux 终端会话**：菜单「Termux 终端会话」在应用内直连 Termux 开持久 shell（前台不切换 App）——FIFO（`$HOME/.pc_term_in`，写端 `sleep 86400` 保活）+ 交换目录 out 文件 200ms 增量轮询，**指令与输出双向实时回传**，命令 base64 编码经 RUN_COMMAND 写入避免转义问题；新桥：`pickProjectFolder/readProject/writeProjectFile/saveFileEx/startTermSession/sendTermCmd/stopTermSession/encodeBytes/readFileSmart`；versionCode 15 |
-| **v4.0.1** | z（全面 debug 修复） | **前端 6 项**：①成员补全按已输入前缀过滤（`math.fa`→只弹 fabs(/factorial(，此前弹全表）；②采纳补全后浮层不再立即重弹（`applySuppressPos` 抑制 + 继续输入恢复）；③`std::` 作用域成员补全修复（成员正则只认 `.` 不认 `::`，此前 `std::co` 永远无法弹出 std 表）；④`#include <` 头文件补全同样补上前缀过滤（`cma`→cmath）；⑤中文输入法组合中（`cm.composing`）不再弹英文候选；⑥补全浮层在矮视口下 top 加 `Math.max(4,…)` 防负坐标；项目文件保存失败（如 ASCII 含中文）时终端明确输出失败数与原因提示。**原生 6 项**：⑦`readAllBytes`/`readFile` 单次 `read()` 改循环读满（大文件理论截断风险）；⑧UTF-16LE/BE 导出加 BOM（此前导出文件回读必乱码）；⑨ASCII 含中文改为明确报错提示（此前静默变 `?` 损坏内容）；⑩项目目录对话框 `show()` 失败时 `countDown` 防 JS 桥线程卡 180 秒；⑪`sendTermCmd` 包 `timeout 3`（shell 退出后 FIFO 无读端会永久阻塞）；⑫`onDestroy` 停 Termux 轮询线程、Pyodide 注入改用标准 `FS.analyzePath`；在线引擎 + 项目模式运行时提示暂不支持项目内 import/头文件；Playwright 回归实测 7 项全过；versionCode 16 |
-| **v4.1** | y（真机反馈修复 + 打开文件） | **🔴 重大修复：v4.0 原生桥全部断裂**——`pickProjectFolder/readProject/writeProjectFile/saveFileEx/startTermSession/sendTermCmd/stopTermSession` 七个 `@JavascriptInterface` 方法误加在 `MainActivity` 类主体（编译可过），而 JS 桥对象是 `NativeBridge` 内部类，`window.Android` 上根本不存在这些方法 → 真机上「打开文件夹」提示「仅安卓应用内可用」、编码导出走浏览器降级、Termux 会话无法连接。全部移入 `NativeBridge`；**新增打开单个本地文件**：原生选择器（目录+代码文件混合列表，点文件即选）→ `readSingleFile`（智能编码识别）→ `__onSingleFileLoaded` 加入文件列表（重名自动加序号），资源管理器头部新增「打开文件」「打开文件夹」按钮（与新建文件并排），菜单同步加「打开文件」；**UI 修复**：更多菜单内容超屏不可滚动（`overflow:hidden` → `max-height: calc(100vh - 62px)` + `overflow-y:auto`）；「关于」三个选项卡在窄屏被挤出（`white-space:nowrap` → 允许换行 + `flex-wrap`）；目录选择器列表按「目录在前+名称排序」，文件对话框扩展名白名单（py/cpp/c/h/txt/md/json/java/js/html/css/xml/csv）；versionCode 17 |
-| **v4.1.1** | z（错误标注交互优化） | **① 跳转到最靠前的错误行**：标注前按行号排序，光标自动跳转 + 滚动定位到行号最小的错误（此前跳的是解析输出顺序的第一个，不保证最靠前），5 秒错误泡也显示该行错误；**② 编辑标红行立即消红**：`cm6.js` 监听器回调加传 `update` 对象，`onChange` 里用 `changes.iterChanges` 判断本次编辑是否触及标红行区间（行首/行尾双锚点，变更前坐标系求交），触及即从标红集合移除该行（**不论改对改错**），其余标红保留且锚点经 `changes.mapPos` 随增删行自动偏移（增行后标红跟随到新行号）；标红全部清完后自动清理装饰与错误泡；重新运行/切换文件仍清全部标红；versionCode 18 |
-| **v4.1.2** | z（停止立即生效） | **运行中点「停止」按引擎立即终止，不再等超时**：①**在线引擎**——`runWandbox`/`runJudge0` fetch 接入 `AbortController`（`runOnlineExe` 统一创建），点停止立即 `abort()`，请求取消、进程终止，终端输出非实质错误 `⏹ KeyboardInterrupt: 已手动停止`；②**JSCPP**——超时计时器提为全局 `jscppTimer`，点停止立即 `terminate()` Worker + 清计时器 + 状态复位（此前只能干等 10 秒超时）；③**Termux**——此前 `cancelCpp` 杀进程后前端轮询已停、`onCppResult` 永不到达导致运行状态卡死，现停止后前端立即 `finishCpp()` 复位并输出停止信息；④**内置 Python**——等待 Pyodide 加载时点停止立即取消等待（循环加 `running` 条件）；执行中因 Pyodide 主线程同步执行无法强制中断，如实提示（无限循环建议在线引擎/Termux）；运行类型细化为 `python/py-online/termux/cpp-online/jscpp` 五类分别处理；versionCode 19 |
-| **v4.1.3** | z（交换目录失控输出保护 + 临时文件自动清理） | **三重防护治理 `/sdcard/QingCode/` 交换目录残留**（用户实测死循环打印使 `.stdout` 膨胀至 614.86MB）：①**运行中超限保护**——轮询发现 `.stdout` 超 32MB 立即杀 `.prog.pid`/`.keep.pid` 进程，终端输出 `⏹ timeout exit 125（输出超过 32MB 上限，已自动停止，疑似死循环打印等失控输出）`；②**结束后自动清理**——编译失败/运行结束/超时三分支结束后自动删除 `.stdout/.stderr/.compile.exit/.run.exit/.prog.pid/.keep.pid/.termux.log/.pc_in/.term_out` 与交换目录下源码副本（保留 `源码/` 与 `.app.log`）；③**启动清理**——App 启动即清掉上次残留（旧版 615MB 巨型 `.stdout` 装上即被清掉）；④**终端会话保护**——Termux 会话 `.term_out` 超 64MB 自动断开会话并提示；修复 `stopTermSession` 提取为 `stopTermSessionInternal`（内部类与轮询线程共用）；versionCode 20 |
-| **v4.1.4** | z（初始化向导逐条命令化） | **「环境向导 ②」初始化指引改为逐条命令展示**：原来第 2 步是一条 `;` 串联的复合初始化命令（`termux-setup-storage; mkdir…; pkg install…`）+「一键复制」按钮整串复制；现拆为 **7 条独立命令**（清华源 1 条 + 初始化 6 条：setup-storage / mkdir / allow-external-apps / reload-settings / pkg install clang / 完成提示 echo），每条独立代码块、左侧序号标签（`position:absolute` + `user-select:none`，序号不会被选中混入复制内容），按顺序从上到下执行、上一条执行完再复制下一条；**去掉「一键复制」按钮**（用户长按自行复制），每条命令下附灰色小字说明（首次弹「允许访问」点允许、`(y/n)` 输 y）；`INIT_CMD` 复合串重构为 `INIT_CMDS` 数组（浏览器降级提示同步逐条输出）；versionCode 21 |
-| **v4.2** | y（界面双语：中文 / English） | **首次启动弹出语言选择对话框**（logo + 双语标题，「中文」「English」两按钮，选择持久化 `localStorage('pc_lang')`，不选不进主界面）；**之后可随时切换**：更多菜单新增「🌐 语言 / Language」入口（对话框带「取消」，可关闭不改）；**界面全量双语**——新增 `web/i18n.js`（中英字典 120+ key + `t()`/`applyLang()`，静态节点 `data-i18n`/`data-i18n-html`/`data-i18n-title`/`data-i18n-ph` 四类属性驱动替换），覆盖顶栏/侧栏/欢迎页/终端面板/状态栏/通用对话框/获取 Termux/初始化向导（含 7 条命令步骤全文）/关于页三选项卡/更多菜单全部菜单项与引擎下拉选项，及动态文案（Pyodide 状态、新建/重命名/删除对话框、文件名校验提示、权限引导、Termux 指引、恢复示例、编码切换、自动保存开关等 20+ 处 `t()` 改造）；切换即时生效无需重启，刷新后持久保持；终端程序输出内容不参与翻译（程序输出保持原样）；Playwright 实测六场景（首启弹窗/English 生效/菜单切换/中文恢复/刷新持久/英文下向导+新建+关于页全英文）全过，修复批量替换产生的 5 处 `data-i18n` 属性缺失闭合引号导致 `mi-rename` 等元素解析异常；versionCode 22 |
-| **v4.3** | y（更名 QingCode + 权限引导重构 + Termux 后台唤醒） | **英文名由 PocketCode 更名为 QingCode**（规避与知名项目重名；「轻码」拼音直译，中英文完全对应；中文显示名「轻码编辑器」不变）——包名 `com.pocketcode.editor` → `com.qingcode.editor`、交换目录 `/sdcard/PocketCode/` → `/sdcard/QingCode/`、日志 TAG 与导出文件名、签名证书 CN、构建产物名、README/使用说明/LICENSE 全量同步；**启动即主动请求权限**（权限未齐时每次启动都引导，直到授权成功）：`onCreate` 新增 `requestPermissionsOnLaunch()`——Android 11+ 先弹「Termux 运行命令」运行时授权窗口、批准后在 `onRequestPermissionsResult` 自动衔接跳转「所有文件访问」设置页（两个引导不同时抢屏），被系统「不再询问」的权限自动改跳应用详情设置页手动开启（修复 RUN_COMMAND 死路：旧版提示「请批准弹窗」但系统永远不再弹窗），Android 10 及以下合并请求写存储 + RUN_COMMAND（code 40）；`onResume` 授权回流检测——从设置页开完权限返回后自动重新探测并刷新前端环境状态（存储由不可写变可写即触发 `probeTermux()`），无需重启或手动检测；**Termux 后台自动唤醒**：`sendRunCommand` 前新增 `wakeTermux()`，先发一条无害后台命令（`sh -c true`）拉起 RunCommandService/TermuxService，Termux 进程被系统杀掉后点编译/运行即自动后台拉起再入队执行，无需先手动打开 Termux（唤醒日志在系统拦截 startService 时提示关闭电池优化/加自启动白名单）；versionCode 23 |
-| **v4.4** | y（插件接口预留 + 首启提速） | **插件接口预留（PCPluginAPI v1，插件由用户自行开发）**：新增 `web/app.js` `PluginHost`/`window.PCPluginAPI`——`register(meta)` 注册插件（`languages` 注册语言：扩展名并入「新建文件」白名单且 ▶ 运行按扩展名分流到插件 `onRun(file, code, langDef, api)`；`menu` 注册「更多菜单」项；`onInit` 加载回调）；能力通道：`out`/`meta`/`toast`/`copy`/`storage(id)` 隔离存储、**`execTermux(script, bg)` 底层原语**（任意 Termux 脚本）与 **`runCapture(script)` 高层封装**（输出重定向到交换目录临时文件 + 300ms 轮询 + 自动清理，120s 超时，返回 `Promise<{code, output}>`）；原生新增 7 个桥方法：`listPlugins`（列 `/sdcard/QingCode/plugins/*.js`）/`readPlugin`/`execTermux`/`readSwapFile`/`writeSwapFile`/`deleteSwapFile`/`showToast`（交换目录文件读写均防路径穿越：限名字符集 + canonical path 校验）；插件以 `new Function('PCPluginAPI', src)` 隔离加载、报错不影响主程序；接口文档与语言插件骨架见源码 `plugins/`（`插件接口说明.md` + `example-lang-plugin.js`，build.sh 同步打入源码快照）；**首启提速**——定位卡顿根因为启动 800ms 即开始预加载 Pyodide（约 10MB WASM 编译抢满 CPU 数秒致 UI 冻结）：预加载延后至 3.5s；`onCreate` 给 WebView 设置主题底色 `#1e1e1e` 消除启动白屏；`onResume` 的存储写测试移至后台线程（主线程不再做磁盘 IO）；versionCode 24 |
-| **v4.5** | y（Python 编译缓存 + 说明文件双语） | **Python 运行时编译缓存**：`ensurePyodide` 加载前挂接 `WebAssembly.instantiateStreaming` 钩子——`pyodide.asm.wasm`（约 10MB）的编译结果 `WebAssembly.Module` 持久化到 IndexedDB（键含 URL 与字节数，升级自动失效重建），**下次冷启动直接 `new WebAssembly.Instance(cachedModule)` 跳过整个编译阶段**（加载耗时大头），状态栏显示加载耗时并在命中缓存时提示「编译缓存命中」；说明：V8 编译产物为引擎内部对象，只能存于应用内部持久存储（IndexedDB），交换目录无法承载——效果即「编译状态跨冷启动快速调用」，HTTP 层资源缓存头（wasm 7 天 / js 1 天）原生侧早已有之；**说明文件全面双语**：新增 `使用说明_EN.md`（英文版使用说明全文）与 `plugins/Plugin-API-Guide_EN.md`（插件接口英文版），中文版顶部加中英切换行，README/使用说明/插件文档三份说明全部中英对照；versionCode 25 |
-| **v4.6** | y（启动页 + 插件管理页 + 插件接口 v2） | **启动页（Python 就绪前不进主界面）**：新增全屏启动页（logo + 版本号 + 进度条 + 阶段状态文字），启动即触发 Python 运行时加载并实时显示进度（加载 pyodide.mjs → 初始化解释器平滑爬升 8%→85% → 就绪 100%），**就绪后才进入主界面**；取代 v4.4 的「预加载延后 3.5s」方案——启动页本身就是等待 UI，编译占用 CPU 不再有「卡顿感」，且进入应用即可秒跑 Python；**失败/超时兜底**：加载失败或 90s 超时显示「跳过加载，直接进入」按钮（不锁死应用，后台继续加载，进入后 Python 可用照常）；`ensurePyodide` 支持 `onProgress` 进度回调；v4.5 编译缓存命中后二次冷启动进度飞快；**插件管理页（更多菜单 → 🧩 插件管理）**：全屏页面 + **顶部选项卡**——内置「已加载」（插件卡片：名称/版本/作者/描述/id/来源文件 + 启用状态与启停按钮）/「语言」（插件注册语言表格）/「设置」（插件接口与目录信息 + **插件系统总开关** + 预留说明）；**预留 API（PCPluginAPI 升级 v2）**：`page(tabId, { title, render(container, api) })` 向管理页注册自定义选项卡（惰性渲染，内置选项卡不可覆盖）、meta 新增 `author`/`description`/`homepage`/`onUnload` 标准字段（管理页展示）、**插件启停**：`localStorage('pc_plugins_disabled')` 按文件名禁用 + `pc_plugins_enabled` 总开关，`loadPlugins` 跳过禁用插件（重启生效），管理页可切换并 toast 提示；versionCode 26 |
-| **v4.7** | y（Termux 原生 Python 引擎） | **Termux Python 成为 Python 的第三个引擎**（菜单「Python 引擎」新增「Termux Python（原生·可 pip 装库）」，与内置 Pyodide / 在线编译并列）：复用 C++ 的整套 Termux 基建（RUN_COMMAND + wakeTermux 后台唤醒 + mkfifo 交互管道 + 200ms 增量轮询 + 32MB 失控输出保护 + 超时强杀），新增原生桥 `runPyTermux`——**无编译阶段**，`python -X utf8 -u` 直接解释执行交换目录中的 .py（`-u` 实时流式输出，`-X utf8` 避免编码问题）；**配置语句与 C++ 完全分离**：python 缺失时运行脚本自动 `pkg install -y python`（联网一次），与 C++ 的 clang 安装、初始化向导互不影响；`input()` 交互与 C++ 一致（终端输入行写 FIFO 逐行实时）；项目模式下所有 .py 平铺写入交换目录，同目录模块可直接 import（复杂包结构建议 site-packages 或 Termux 终端）；停止键与 C++ 同路径即时终止；versionCode 27 |
+| **v5.11.0** | y（移动 IDE 核心升级与稳定性） | **核心修正**：`.qingcode.json` 真正可枚举 · SAF 磁盘签名检测 · 关闭项目保护未保存 · 项目重命名/删除落盘 · Pyodide 保留目录结构 · 编译错误带文件身份且可跳转 · **性能**：大文件关高亮 · 日志增量追加 · 全局搜索分片补读 · 单次读盘 ≤64KB · 日志轮转 · base64 分块 · **触控**：目标放大到 34–40px · `--kb` 参与布局 · 矮屏适配 · 多光标 Pointer Events |
+| **v5.10.1** | z（安全审查修复 12 项） | **按外部安全审查报告逐项加固**：插件权限默认全不授予、主线程插件改只读提示 · Termux 命令执行前原生确认 · 插件目录写入由原生拒绝 · 新增 CSP（沙箱 Worker `connect-src 'none'`）· 插件加载消除 TOCTOU（内容与哈希同一次读取）· 主线程 Python 无隔离时拒绝降级 · `.qingcode.json` 校验加固 + 首次确认 · 私有目录编译 · 在线安装先展示指纹与源码 |
 | **v5.10.0** | y（SAF 工作区 + 构建拆分） | **SAF 工作区**（系统目录授权、令牌式接入、写入绑定授权树、临时文件+备份替换）· **多源编译**与全量缓存键 + LRU · 保留目录结构的暂存器 · `.qingcode.json` · 会话状态机与 `sessionId` 过期丢弃 · 编译/运行分离 · `stderr` 增量 · 输出合帧与双上限 |
 | **v5.9.1** | z（全面 debug） | 修 5 处缺陷：键条上下键列位、目录树活动文件不可见、`.JS` 列出却读不出、沙箱启动失败仍显示运行中、切语言后问题面板不刷新；新增 16 项边界回归 |
 | **v5.9.0** | y（工作台 / 语言服务 / 待补齐） | 终端·输出·问题三面板、目录树、键条、软键盘与平板布局；**LanguageService 统一协议**（版本 + 取消 + 过期丢弃，独立分析实例）；控制面板与片段编辑、插件在线安装、沙箱 `onUnload`/`call-result`/明确报错、主线程 Python 可中断、统一搜索；回归脚本入库 |
@@ -342,3 +405,30 @@
 | **v4.9** | y（全屏设置页 + Termux 缺失禁用 + 启动页跳过确认） | **右上角「⋯」升级为全屏设置页**：点击后直接进入全屏设置界面（不再弹下拉小菜单），原有全部菜单项按「编辑 / 引擎与 Termux / 文件 / 通用」四个选项卡分组保留（引擎与编译器下拉、获取 Termux、配置 C++ / Python、终端会话、项目空间、编码、插件、语言、调试日志、关于等一项不少），返回键或「⋯」关闭；**启动时检测 Termux 是否安装**：未安装则取消所有 Termux 编译项目——C++ 与 Python 引擎下拉中的 Termux 选项置灰禁用、已保存为 Termux 的引擎自动回退（C++ → 自动降级 / Python → 内置 Pyodide），进入主界面后终端与状态栏提示「缺少 Termux，仅可使用部分功能」，运行 Termux 类功能（真实编译 / Termux Python / 终端会话 / 交互运行）统一拦截并给出安装指引；**启动页右上角常驻「跳过 →」**：点击弹确认对话框（「跳过后部分功能可能不可用，界面可能出现短暂卡顿；引擎仍在后台继续准备」），确认后直接进入主界面，未完成的加载 / 安装任务在后台继续；versionCode 30 |
 | **v4.8.1** | z（启动页双引擎进度条） | **启动页改为「Python + C++」双进度条**：Python（Pyodide）在上、C++（Termux）在下（各自标签/百分比/状态文字，C++ 条绿色渐变区分，等待期间置灰）；**严格顺序加载**——Python 引擎就绪（或失败/90s 超时）后，才启动 C++ Termux 阶段：检测 python/clang → 缺失自动注入 `pkg install` 并**在启动页等待安装完成**（每 8s 复检，最长等 5 分钟；超时转后台继续安装并自动进入，装好后自动刷新引擎状态）；**未装 Termux / 浏览器环境秒过**（显示「未检测到 Termux，已跳过」），不拖慢进入；取代 v4.8 的「boot 末尾 2.5s 后台静默检测」——检测前置可视、等待有兜底，任一引擎失败仍可「跳过进入」不锁死；versionCode 29 |
 | **v4.8** | y（Termux 环境自动维护 + 配置对话框双选项卡） | **每次启动自动检测并配置 Termux**：boot 末尾（Python 运行时就绪、界面与插件等主要准备工作完成后，延迟 2.5s 不阻塞）执行 `autoTermuxSetup()`——向 Termux 后台发送检测脚本（`command -v python / clang`，经 runCapture 通道捕获结果），**Python 或 clang 缺失即自动在后台注入 `pkg install -y python / clang`**（终端留痕、不弹窗、不阻塞；Termux 未安装或无权限时静默跳过；runCapture 120s 超时保护）；**「配置 C++」「配置 Python」双选项卡**：三点菜单原「环境向导 ② 初始化」「③ 重新检测」两项合并升级为「⚙️ 配置 C++」「🐍 配置 Python」两个入口，点击打开同一个配置对话框（顶部 C++ / Python 选项卡）——C++ 选项卡保留原初始化 7 条命令向导，Python 选项卡为 `pkg install -y python` + pip 清华源换源命令 + 引擎切换说明，两选项卡共用「立即检测并自动配置」按钮（手动触发同一检测注入流程）；**自动化仍是主路径**：运行时脚本内的自动安装兜底（C++ 与 Termux Python 均有）保留，手动向导仅为备选；versionCode 28 |
+| **v4.7** | y（Termux 原生 Python 引擎） | **Termux Python 成为 Python 的第三个引擎**（菜单「Python 引擎」新增「Termux Python（原生·可 pip 装库）」，与内置 Pyodide / 在线编译并列）：复用 C++ 的整套 Termux 基建（RUN_COMMAND + wakeTermux 后台唤醒 + mkfifo 交互管道 + 200ms 增量轮询 + 32MB 失控输出保护 + 超时强杀），新增原生桥 `runPyTermux`——**无编译阶段**，`python -X utf8 -u` 直接解释执行交换目录中的 .py（`-u` 实时流式输出，`-X utf8` 避免编码问题）；**配置语句与 C++ 完全分离**：python 缺失时运行脚本自动 `pkg install -y python`（联网一次），与 C++ 的 clang 安装、初始化向导互不影响；`input()` 交互与 C++ 一致（终端输入行写 FIFO 逐行实时）；项目模式下所有 .py 平铺写入交换目录，同目录模块可直接 import（复杂包结构建议 site-packages 或 Termux 终端）；停止键与 C++ 同路径即时终止；versionCode 27 |
+| **v4.6** | y（启动页 + 插件管理页 + 插件接口 v2） | **启动页（Python 就绪前不进主界面）**：新增全屏启动页（logo + 版本号 + 进度条 + 阶段状态文字），启动即触发 Python 运行时加载并实时显示进度（加载 pyodide.mjs → 初始化解释器平滑爬升 8%→85% → 就绪 100%），**就绪后才进入主界面**；取代 v4.4 的「预加载延后 3.5s」方案——启动页本身就是等待 UI，编译占用 CPU 不再有「卡顿感」，且进入应用即可秒跑 Python；**失败/超时兜底**：加载失败或 90s 超时显示「跳过加载，直接进入」按钮（不锁死应用，后台继续加载，进入后 Python 可用照常）；`ensurePyodide` 支持 `onProgress` 进度回调；v4.5 编译缓存命中后二次冷启动进度飞快；**插件管理页（更多菜单 → 🧩 插件管理）**：全屏页面 + **顶部选项卡**——内置「已加载」（插件卡片：名称/版本/作者/描述/id/来源文件 + 启用状态与启停按钮）/「语言」（插件注册语言表格）/「设置」（插件接口与目录信息 + **插件系统总开关** + 预留说明）；**预留 API（PCPluginAPI 升级 v2）**：`page(tabId, { title, render(container, api) })` 向管理页注册自定义选项卡（惰性渲染，内置选项卡不可覆盖）、meta 新增 `author`/`description`/`homepage`/`onUnload` 标准字段（管理页展示）、**插件启停**：`localStorage('pc_plugins_disabled')` 按文件名禁用 + `pc_plugins_enabled` 总开关，`loadPlugins` 跳过禁用插件（重启生效），管理页可切换并 toast 提示；versionCode 26 |
+| **v4.5** | y（Python 编译缓存 + 说明文件双语） | **Python 运行时编译缓存**：`ensurePyodide` 加载前挂接 `WebAssembly.instantiateStreaming` 钩子——`pyodide.asm.wasm`（约 10MB）的编译结果 `WebAssembly.Module` 持久化到 IndexedDB（键含 URL 与字节数，升级自动失效重建），**下次冷启动直接 `new WebAssembly.Instance(cachedModule)` 跳过整个编译阶段**（加载耗时大头），状态栏显示加载耗时并在命中缓存时提示「编译缓存命中」；说明：V8 编译产物为引擎内部对象，只能存于应用内部持久存储（IndexedDB），交换目录无法承载——效果即「编译状态跨冷启动快速调用」，HTTP 层资源缓存头（wasm 7 天 / js 1 天）原生侧早已有之；**说明文件全面双语**：新增 `使用说明_EN.md`（英文版使用说明全文）与 `plugins/Plugin-API-Guide_EN.md`（插件接口英文版），中文版顶部加中英切换行，README/使用说明/插件文档三份说明全部中英对照；versionCode 25 |
+| **v4.4** | y（插件接口预留 + 首启提速） | **插件接口预留（PCPluginAPI v1，插件由用户自行开发）**：新增 `web/app.js` `PluginHost`/`window.PCPluginAPI`——`register(meta)` 注册插件（`languages` 注册语言：扩展名并入「新建文件」白名单且 ▶ 运行按扩展名分流到插件 `onRun(file, code, langDef, api)`；`menu` 注册「更多菜单」项；`onInit` 加载回调）；能力通道：`out`/`meta`/`toast`/`copy`/`storage(id)` 隔离存储、**`execTermux(script, bg)` 底层原语**（任意 Termux 脚本）与 **`runCapture(script)` 高层封装**（输出重定向到交换目录临时文件 + 300ms 轮询 + 自动清理，120s 超时，返回 `Promise<{code, output}>`）；原生新增 7 个桥方法：`listPlugins`（列 `/sdcard/QingCode/plugins/*.js`）/`readPlugin`/`execTermux`/`readSwapFile`/`writeSwapFile`/`deleteSwapFile`/`showToast`（交换目录文件读写均防路径穿越：限名字符集 + canonical path 校验）；插件以 `new Function('PCPluginAPI', src)` 隔离加载、报错不影响主程序；接口文档与语言插件骨架见源码 `plugins/`（`插件接口说明.md` + `example-lang-plugin.js`，build.sh 同步打入源码快照）；**首启提速**——定位卡顿根因为启动 800ms 即开始预加载 Pyodide（约 10MB WASM 编译抢满 CPU 数秒致 UI 冻结）：预加载延后至 3.5s；`onCreate` 给 WebView 设置主题底色 `#1e1e1e` 消除启动白屏；`onResume` 的存储写测试移至后台线程（主线程不再做磁盘 IO）；versionCode 24 |
+| **v4.3** | y（更名 QingCode + 权限引导重构 + Termux 后台唤醒） | **英文名由 PocketCode 更名为 QingCode**（规避与知名项目重名；「轻码」拼音直译，中英文完全对应；中文显示名「轻码编辑器」不变）——包名 `com.pocketcode.editor` → `com.qingcode.editor`、交换目录 `/sdcard/PocketCode/` → `/sdcard/QingCode/`、日志 TAG 与导出文件名、签名证书 CN、构建产物名、README/使用说明/LICENSE 全量同步；**启动即主动请求权限**（权限未齐时每次启动都引导，直到授权成功）：`onCreate` 新增 `requestPermissionsOnLaunch()`——Android 11+ 先弹「Termux 运行命令」运行时授权窗口、批准后在 `onRequestPermissionsResult` 自动衔接跳转「所有文件访问」设置页（两个引导不同时抢屏），被系统「不再询问」的权限自动改跳应用详情设置页手动开启（修复 RUN_COMMAND 死路：旧版提示「请批准弹窗」但系统永远不再弹窗），Android 10 及以下合并请求写存储 + RUN_COMMAND（code 40）；`onResume` 授权回流检测——从设置页开完权限返回后自动重新探测并刷新前端环境状态（存储由不可写变可写即触发 `probeTermux()`），无需重启或手动检测；**Termux 后台自动唤醒**：`sendRunCommand` 前新增 `wakeTermux()`，先发一条无害后台命令（`sh -c true`）拉起 RunCommandService/TermuxService，Termux 进程被系统杀掉后点编译/运行即自动后台拉起再入队执行，无需先手动打开 Termux（唤醒日志在系统拦截 startService 时提示关闭电池优化/加自启动白名单）；versionCode 23 |
+| **v4.2** | y（界面双语：中文 / English） | **首次启动弹出语言选择对话框**（logo + 双语标题，「中文」「English」两按钮，选择持久化 `localStorage('pc_lang')`，不选不进主界面）；**之后可随时切换**：更多菜单新增「🌐 语言 / Language」入口（对话框带「取消」，可关闭不改）；**界面全量双语**——新增 `web/i18n.js`（中英字典 120+ key + `t()`/`applyLang()`，静态节点 `data-i18n`/`data-i18n-html`/`data-i18n-title`/`data-i18n-ph` 四类属性驱动替换），覆盖顶栏/侧栏/欢迎页/终端面板/状态栏/通用对话框/获取 Termux/初始化向导（含 7 条命令步骤全文）/关于页三选项卡/更多菜单全部菜单项与引擎下拉选项，及动态文案（Pyodide 状态、新建/重命名/删除对话框、文件名校验提示、权限引导、Termux 指引、恢复示例、编码切换、自动保存开关等 20+ 处 `t()` 改造）；切换即时生效无需重启，刷新后持久保持；终端程序输出内容不参与翻译（程序输出保持原样）；Playwright 实测六场景（首启弹窗/English 生效/菜单切换/中文恢复/刷新持久/英文下向导+新建+关于页全英文）全过，修复批量替换产生的 5 处 `data-i18n` 属性缺失闭合引号导致 `mi-rename` 等元素解析异常；versionCode 22 |
+| **v4.1.4** | z（初始化向导逐条命令化） | **「环境向导 ②」初始化指引改为逐条命令展示**：原来第 2 步是一条 `;` 串联的复合初始化命令（`termux-setup-storage; mkdir…; pkg install…`）+「一键复制」按钮整串复制；现拆为 **7 条独立命令**（清华源 1 条 + 初始化 6 条：setup-storage / mkdir / allow-external-apps / reload-settings / pkg install clang / 完成提示 echo），每条独立代码块、左侧序号标签（`position:absolute` + `user-select:none`，序号不会被选中混入复制内容），按顺序从上到下执行、上一条执行完再复制下一条；**去掉「一键复制」按钮**（用户长按自行复制），每条命令下附灰色小字说明（首次弹「允许访问」点允许、`(y/n)` 输 y）；`INIT_CMD` 复合串重构为 `INIT_CMDS` 数组（浏览器降级提示同步逐条输出）；versionCode 21 |
+| **v4.1.3** | z（交换目录失控输出保护 + 临时文件自动清理） | **三重防护治理 `/sdcard/QingCode/` 交换目录残留**（用户实测死循环打印使 `.stdout` 膨胀至 614.86MB）：①**运行中超限保护**——轮询发现 `.stdout` 超 32MB 立即杀 `.prog.pid`/`.keep.pid` 进程，终端输出 `⏹ timeout exit 125（输出超过 32MB 上限，已自动停止，疑似死循环打印等失控输出）`；②**结束后自动清理**——编译失败/运行结束/超时三分支结束后自动删除 `.stdout/.stderr/.compile.exit/.run.exit/.prog.pid/.keep.pid/.termux.log/.pc_in/.term_out` 与交换目录下源码副本（保留 `源码/` 与 `.app.log`）；③**启动清理**——App 启动即清掉上次残留（旧版 615MB 巨型 `.stdout` 装上即被清掉）；④**终端会话保护**——Termux 会话 `.term_out` 超 64MB 自动断开会话并提示；修复 `stopTermSession` 提取为 `stopTermSessionInternal`（内部类与轮询线程共用）；versionCode 20 |
+| **v4.1.2** | z（停止立即生效） | **运行中点「停止」按引擎立即终止，不再等超时**：①**在线引擎**——`runWandbox`/`runJudge0` fetch 接入 `AbortController`（`runOnlineExe` 统一创建），点停止立即 `abort()`，请求取消、进程终止，终端输出非实质错误 `⏹ KeyboardInterrupt: 已手动停止`；②**JSCPP**——超时计时器提为全局 `jscppTimer`，点停止立即 `terminate()` Worker + 清计时器 + 状态复位（此前只能干等 10 秒超时）；③**Termux**——此前 `cancelCpp` 杀进程后前端轮询已停、`onCppResult` 永不到达导致运行状态卡死，现停止后前端立即 `finishCpp()` 复位并输出停止信息；④**内置 Python**——等待 Pyodide 加载时点停止立即取消等待（循环加 `running` 条件）；执行中因 Pyodide 主线程同步执行无法强制中断，如实提示（无限循环建议在线引擎/Termux）；运行类型细化为 `python/py-online/termux/cpp-online/jscpp` 五类分别处理；versionCode 19 |
+| **v4.1.1** | z（错误标注交互优化） | **① 跳转到最靠前的错误行**：标注前按行号排序，光标自动跳转 + 滚动定位到行号最小的错误（此前跳的是解析输出顺序的第一个，不保证最靠前），5 秒错误泡也显示该行错误；**② 编辑标红行立即消红**：`cm6.js` 监听器回调加传 `update` 对象，`onChange` 里用 `changes.iterChanges` 判断本次编辑是否触及标红行区间（行首/行尾双锚点，变更前坐标系求交），触及即从标红集合移除该行（**不论改对改错**），其余标红保留且锚点经 `changes.mapPos` 随增删行自动偏移（增行后标红跟随到新行号）；标红全部清完后自动清理装饰与错误泡；重新运行/切换文件仍清全部标红；versionCode 18 |
+| **v4.1** | y（真机反馈修复 + 打开文件） | **🔴 重大修复：v4.0 原生桥全部断裂**——`pickProjectFolder/readProject/writeProjectFile/saveFileEx/startTermSession/sendTermCmd/stopTermSession` 七个 `@JavascriptInterface` 方法误加在 `MainActivity` 类主体（编译可过），而 JS 桥对象是 `NativeBridge` 内部类，`window.Android` 上根本不存在这些方法 → 真机上「打开文件夹」提示「仅安卓应用内可用」、编码导出走浏览器降级、Termux 会话无法连接。全部移入 `NativeBridge`；**新增打开单个本地文件**：原生选择器（目录+代码文件混合列表，点文件即选）→ `readSingleFile`（智能编码识别）→ `__onSingleFileLoaded` 加入文件列表（重名自动加序号），资源管理器头部新增「打开文件」「打开文件夹」按钮（与新建文件并排），菜单同步加「打开文件」；**UI 修复**：更多菜单内容超屏不可滚动（`overflow:hidden` → `max-height: calc(100vh - 62px)` + `overflow-y:auto`）；「关于」三个选项卡在窄屏被挤出（`white-space:nowrap` → 允许换行 + `flex-wrap`）；目录选择器列表按「目录在前+名称排序」，文件对话框扩展名白名单（py/cpp/c/h/txt/md/json/java/js/html/css/xml/csv）；versionCode 17 |
+| **v4.0.1** | z（全面 debug 修复） | **前端 6 项**：①成员补全按已输入前缀过滤（`math.fa`→只弹 fabs(/factorial(，此前弹全表）；②采纳补全后浮层不再立即重弹（`applySuppressPos` 抑制 + 继续输入恢复）；③`std::` 作用域成员补全修复（成员正则只认 `.` 不认 `::`，此前 `std::co` 永远无法弹出 std 表）；④`#include <` 头文件补全同样补上前缀过滤（`cma`→cmath）；⑤中文输入法组合中（`cm.composing`）不再弹英文候选；⑥补全浮层在矮视口下 top 加 `Math.max(4,…)` 防负坐标；项目文件保存失败（如 ASCII 含中文）时终端明确输出失败数与原因提示。**原生 6 项**：⑦`readAllBytes`/`readFile` 单次 `read()` 改循环读满（大文件理论截断风险）；⑧UTF-16LE/BE 导出加 BOM（此前导出文件回读必乱码）；⑨ASCII 含中文改为明确报错提示（此前静默变 `?` 损坏内容）；⑩项目目录对话框 `show()` 失败时 `countDown` 防 JS 桥线程卡 180 秒；⑪`sendTermCmd` 包 `timeout 3`（shell 退出后 FIFO 无读端会永久阻塞）；⑫`onDestroy` 停 Termux 轮询线程、Pyodide 注入改用标准 `FS.analyzePath`；在线引擎 + 项目模式运行时提示暂不支持项目内 import/头文件；Playwright 回归实测 7 项全过；versionCode 16 |
+| **v4.0** | x（全面升级 · 四大功能） | **① 智能补全**：输入实时弹出候选浮层（120ms debounce），三类场景——标准语法/关键词补全（`pri`→`print(`）、**已成功导入库的成员补全**（`import math` 后 `math.`→sin/cos/sqrt… 共 20 项；`#include <cmath>` 后 `std::` 补全；import/from/#include 正则扫描已导入库）、头文件名补全（`#include <`→25 个常用头）；↑↓ 选择 / Tab 或 Enter 采纳 / Esc 关闭，capture 阶段键盘拦截不影响正常编辑；**② 项目空间**：菜单「打开文件夹」原生目录浏览器（`CountDownLatch` + `AlertDialog` + `ListView`）选定后递归载入全部代码文件（≤200 个/个≤1MB）为项目，文件树显示相对路径、标题栏进入项目模式、**Python `import` 项目内模块自动生效**（运行前 Pyodide `FS.writeFile` 注入虚拟 FS / Termux 头文件写入交换目录）、**每 30 秒自动保存**全部修改回原路径；**③ 保存编码可选**：菜单编码下拉（UTF-8 / UTF-8 BOM / UTF-16LE / UTF-16BE / **GBK** / ASCII），「导出」按所选编码写文件（原生 `encodeBytes` 六编码），读取智能检测（BOM 优先 → UTF-8 严格解码 → GBK 回退，中文不乱码）；**④ 应用内 Termux 终端会话**：菜单「Termux 终端会话」在应用内直连 Termux 开持久 shell（前台不切换 App）——FIFO（`$HOME/.pc_term_in`，写端 `sleep 86400` 保活）+ 交换目录 out 文件 200ms 增量轮询，**指令与输出双向实时回传**，命令 base64 编码经 RUN_COMMAND 写入避免转义问题；新桥：`pickProjectFolder/readProject/writeProjectFile/saveFileEx/startTermSession/sendTermCmd/stopTermSession/encodeBytes/readFileSmart`；versionCode 15 |
+| **v3.4** | y（编译错误可视化标注） | **编译/运行错误直接标进编辑器**：错误输出解析（GCC/Clang `file:line:col: error:` 与 Python Traceback 最后帧）→ **整行问题代码红色高亮**（红底 + 左侧红边条）+ **错误语法/函数下红色波浪线**（自动圈选所在单词）+ **错误处文字泡显示原因**（5 秒自动消失，光标自动滚动定位到错误处）；覆盖全部引擎：Termux 编译失败、在线 C++ 编译错误、内置 Pyodide 异常、在线 Python Traceback（每处最多标 6 个，运行/切文件自动清除）；实现：`cm6.js` bundle 内注入 `StateEffect`/`StateField`/`Decoration` 错误标注模块并暴露 `PCCM.markErrors/clearErrors`；versionCode 14 |
+| **v3.3** | y（关于改版 + 源码随应用分发） | **「关于」全新改版**：logo + 版本号 + 三个选项卡（**用户协议** / **使用项目及致谢**（CodeMirror 6、Pyodide、JSCPP、Wandbox、Judge0、Termux）/ **开发者信息及开源协议**（开发者冯隽熙；采用 **MIT License**，随源码附 LICENSE 文件））；**源代码随应用分发**：构建时打包到 `assets/source/`（排除 Pyodide 二进制），启动/授权后自动释放到 **`/sdcard/QingCode/源码/`**（`.version` 标记按版本增量更新），「关于」底部告知释放路径与状态（新增 `sourcesReady` 桥）；versionCode 13 |
+| **v3.2** | y（新增在线编译引擎） | **C++/Python 各加免费在线引擎（Wandbox 主 + Judge0 CE 备，双引擎自动兜底）**：无需 Termux 即可真实编译运行，运行前检测输入语句预填 stdin（一次性提交，不支持逐步交互）；**引擎切换改下拉菜单**（C++ 引擎 auto/Termux/在线/JSCPP、编译器 clang++/g++、Python 引擎 Pyodide/在线，选择持久化并即时提示）；**修复「关于」双按钮**：对话框加 `showCancel` 控制，纯信息对话框（关于/Termux 指引）只显示「关闭」且确定后直接收起（此前残留上一次 modalMode 误入文件名校验分支，导致「取消+关闭」同时出现且关闭报「请输入文件名」）；versionCode 12 |
+| **v3.1.2** | z（细节优化） | **轮询快照排障增强**：编译/运行轮询每 5s 在日志中记录 `poll#N` 文件快照（交换目录产物大小与 `.termux.log` 增量偏移），Termux 侧 start/end 留痕；`cppJson` 透出真实 stderr 原因；versionCode 11 |
+| **v3.1.1** | z（细节优化） | **修复 SecurityException 根因**：日志实证 `RUN_COMMAND` 为 dangerous 级自定义权限，仅 manifest 声明不够——`runCpp`/`runInTermuxTerminal` 前增加运行时 `requestPermissions` 授权（未授权时弹系统窗口并提示，批准后重试即可）；日志导出增加「保存到下载文件夹」（`Downloads/QingCode-日志-<时间戳>.log`，`exportLogs` 桥）；versionCode 10 |
+| **v3.1** | y（新增日志功能） | **调试日志系统**：原生关键路径全量落日志（getEnv/权限状态/写文件/`startService` 返回值/轮询退出码/超时，内存环形 500 条 + `/sdcard/QingCode/.app.log` 文件）；Termux 侧脚本执行留痕（`.termux.log`，轮询增量透出 `[termux]` 前缀）；菜单新增「导出调试日志（排障）」一键输出+复制；新增 `getLogs`/`appendLog` 桥；versionCode 9 |
+| **v3.0.5** | z（细节优化） | **修复 setup 判定不一致**：运行前 `ensureStorageAccess` 与环境检测统一为「实际写入测试」为准（此前运行额外强制 `isExternalStorageManager`，与检测绿灯矛盾导致误拦）；`cppJson` 补 `message` 字段，setup 失败真实原因（被吞 → 恒显示「Termux 未就绪」）可透传到终端；失败涉及权限时自动弹「前往设置开启」引导；versionCode 8 |
+| **v3.0.4** | z（细节优化） | **运行链路可观测**：点运行后立即输出「已发送编译请求」，每 10s 心跳显示等待时长；超时 stderr 改为 4 步诊断清单（Termux 错误通知 / 通知权限 / 冷重启 / 终端直跑绕行）；versionCode 7 |
+| **v3.0.3** | z（细节优化） | **初始化指引化**：「环境向导 ②」改为先弹 4 步指引对话框（不再直接跳 Termux）：清华源切换命令（仅展示，长按手动复制，不进一键复制）→ 复制初始化命令 → 粘贴执行 → **(y/n) 输入 y 确认** 提示；权限请求前先弹说明对话框（「前往设置开启」确认后才跳系统设置页）；versionCode 6 |
+| **v3.0.2** | z（细节优化） | **存储权限自动引导**：重新检测 / 运行 C++ 时若 Termux 已装但交换目录不可写，自动弹转系统「所有文件访问」设置页（此前 `openAllFilesAccess` 桥无前端入口，会静默降级 JSCPP）；versionCode 5 |
+| **v3.0.1** | z（细节优化） | **「获取 Termux」双选项对话框**（GitHub 下载 / 复制开发者邮箱 19587486395@163.com）；新增 `copyText` 原生桥；versionCode 4。签名密钥自此固定于 `debug.keystore`（口令见 build.sh） |
+| **v3.0** | x（交互重构） | **交互式 I/O（对话框/终端输入行/流式输出）、启动提速（预加载+缓存头+md5 编译缓存）、依赖自动安装 + 环境向导** |
+| **v2.0** | x（换编辑器/编译器） | 编辑器换 CodeMirror 6，C++ 换 Termux 真实编译，JSCPP 降为兜底 |
+| **v1.0** | x（初版） | Monaco + Pyodide + JSCPP，WebView 壳，命令行构建 |

@@ -8,7 +8,7 @@
 'use strict';
 
 /* ---------- 常量 ---------- */
-const APP_VERSION = '5.10.0';
+const APP_VERSION = '5.11.0';
 const PYODIDE_VERSION = '0.26.4';
 /* v5.4.1 安全（审查 #6）：移除 jsDelivr 兜底——CDN 加载无 SRI，可被网络层替换；
    本项目自带 web/pyodide/，本地缺失时应直接报错而不是静默从外部拉取代码。 */
@@ -99,6 +99,7 @@ let pyodide = null;
 let pyState = 'idle';
 /* v4.10 内置 Python Worker 通道（终端式交互输入） */
 let pyMode = null;               // 'worker' | 'main'（首次 ensurePyodide 时按环境决定）
+let pyMainBlocked = false;       // v5.10.1：主线程回退已被禁用（安全审查 P0-4）
 let pyWorker = null;
 let pyWorkerOk = false;
 let pyWorkerLoadPromise = null;
@@ -313,6 +314,11 @@ function outAppend(text, cls) {
 function outClear() {
   outPending = []; outPendingChars = 0; outScheduled = false; outCharsNow = 0;
   $('output-log').innerHTML = '<span class="out-hint">' + t('out_hint_ready') + '</span>';
+  /* v5.11.0：输出面板有「终端 / 输出 / 问题」三页，清空按钮要一起清，
+     否则「输出」页的日志会一直留着，看起来像没生效 */
+  logLines.length = 0;
+  const lv = $('log-view');
+  if (lv) lv.textContent = '';
 }
 function outMeta(text) { outAppend(text + '\n', 'out-meta'); logAppend(text); }
 
@@ -324,13 +330,18 @@ let panelTab = 'term';
 const LOG_MAX_LINES = 500;
 const logLines = [];
 function logAppend(text) {
-  const s = String(text == null ? '' : text);
+  let s = String(text == null ? '' : text);
   if (!s) return;
+  // v5.11.1：单条上限 8KB，避免一次把整个文件内容塞进一个文本节点（条数上限拦不住单条超长）
+  if (s.length > 8192) s = s.slice(0, 8192) + ' …';
   logLines.push(s);
   while (logLines.length > LOG_MAX_LINES) logLines.shift();
   const v = $('log-view');
   if (v) {
-    v.textContent = logLines.join('\n');
+    /* v5.11.0：改成增量追加。原来每条消息都 join 全部 500 行再整体重写 textContent，
+       高频输出时会持续产生大字符串与整块重排。 */
+    v.appendChild(document.createTextNode(s + '\n'));
+    while (v.childNodes.length > LOG_MAX_LINES) v.removeChild(v.firstChild);
     const pane = $('panel-log');
     if (pane && panelTab === 'log') pane.scrollTop = pane.scrollHeight;
   }
@@ -338,7 +349,7 @@ function logAppend(text) {
 let panelProblems = [];
 function setPanelProblems(list) {
   panelProblems = (list || []).map(function (e) {
-    return { line: e.line || 1, col: e.col || 1, message: e.message || '' };
+    return { file: e.file || '', line: e.line || 1, col: e.col || 1, message: e.message || '' };
   });
   renderProblems();
 }
@@ -357,11 +368,22 @@ function renderProblems() {
   panelProblems.forEach(function (p) {
     const b = document.createElement('button');
     b.className = 'prob-row'; b.type = 'button';
-    const loc = document.createElement('span'); loc.className = 'prob-loc'; loc.textContent = 'L' + p.line + ':' + p.col;
+    const short = p.file ? p.file.split('/').pop() : '';
+    const loc = document.createElement('span'); loc.className = 'prob-loc';
+    loc.textContent = (short ? short + ' ' : '') + 'L' + p.line + ':' + p.col;
     const msg = document.createElement('span'); msg.className = 'prob-msg'; msg.textContent = p.message;
     b.appendChild(loc); b.appendChild(msg);
     b.addEventListener('click', function () {
-      if (typeof EditorAPI !== 'undefined' && EditorAPI.gotoLine) EditorAPI.gotoLine(p.line, p.col);
+      /* v5.11.1：错误可能属于别的文件，先切过去再跳行。
+         但 openFile() 会 clearCodeErrors() 把问题面板清空，所以切完要把列表恢复，
+         否则点第一条之后其余错误全部消失（这个功能只能用一次）。 */
+      let ok = true;
+      if (p.file && p.file !== state.active && state.files.some(function (f) { return f.name === p.file; })) {
+        const saved = panelProblems.slice();
+        ok = !!(typeof EditorAPI !== 'undefined' && EditorAPI.openFile && EditorAPI.openFile(p.file));
+        try { setPanelProblems(saved); } catch (e) {}
+      }
+      if (ok && typeof EditorAPI !== 'undefined' && EditorAPI.gotoLine) EditorAPI.gotoLine(p.line, p.col);
     });
     box.appendChild(b);
   });
@@ -421,7 +443,15 @@ function resolveCppEngine(silent) {
 const WB_COMPILER = { python: 'cpython-3.13.8', 'c++': 'gcc-head' };
 const JUDGE0_LANG = { python: 71, 'c++': 54 };   // 54=C++(GCC) 71=Python 3.8
 function b64encodeUtf8(s) {
-  return btoa(String.fromCharCode(...new TextEncoder().encode(s)));
+  /* v5.11.0：分块编码。原来 String.fromCharCode(...bytes) 会把整个文件展开成函数参数，
+     接近 1MB 的源码可能触发参数上限/栈溢出，直接让在线编译失败。 */
+  const bytes = new TextEncoder().encode(s);
+  let bin = '';
+  const STEP = 0x8000;
+  for (let i = 0; i < bytes.length; i += STEP) {
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + STEP));
+  }
+  return btoa(bin);
 }
 function b64decodeUtf8(s) {
   if (!s) return '';
@@ -612,7 +642,7 @@ async function initEditor() {
   const f = state.files.find(x => x.name === state.active) || state.files[0];
   cm = PCCM.create($('editor-container'), {
     doc: f.content,
-    lang: hlLangOf(f.name),
+    lang: isBigFile(f.name) ? null : hlLangOf(f.name),   // v5.11.0：大文件不挂高亮
     fontSize: fontSize,
     onChange: (t, up) => {
       const cur = state.files.find(x => x.name === state.active);
@@ -799,7 +829,14 @@ function openFile(name) {
   state.active = name;
   ensureTab(name);
   const lang = langOf(name);
-  const hlLang = hlLangOf(name);
+  /* v5.11.0：大文件降级真正生效——超过 800KB 不挂语法高亮（解析器本身是主要的卡顿来源），
+     状态栏明确提示，避免用户以为高亮坏了。此前只有判定函数、没有任何调用点。 */
+  const big = isBigFile(name);
+  const hlLang = big ? null : hlLangOf(name);
+  if (big && !f._bigWarned) {
+    f._bigWarned = true;   // 只提示一次，避免来回切文件刷满输出
+    outMeta('大文件模式：已关闭语法高亮以保证滚动流畅（' + Math.round((f.content ? f.content.length : (f._size || 0)) / 1024) + 'KB）');
+  }
   if (typeof EditorAPI !== 'undefined' && EditorAPI) EditorAPI._ownLang = null;
   if (cm) {
     const restored = (prev !== name) ? restoreViewState(name, f) : false;
@@ -965,8 +1002,9 @@ async function ensurePyodide(opts) {
   if (pyMode === 'worker') {
     const ok = await ensurePyWorker(opts);
     if (ok === true) return true;
-    // worker 初始化失败 → 本会话起回退主线程模式（含 wasm 缓存，仍可用对话框输入）
+    // v5.10.1 安全（审查 P0-4）：worker 初始化失败不再回退到主线程执行用户代码
     pyMode = 'main';
+    pyMainBlocked = true;
     setPyState('idle');
   }
   return ensurePyodideMain(opts);
@@ -1157,7 +1195,20 @@ const LsHost = {
       let w;
       try { w = new Worker('py-worker.js'); } catch (e) { this.disabled = true; resolve(false); return; }
       this.worker = w;
-      const done = (ok) => { clearTimeout(to); if (!ok) this.disabled = true; resolve(ok); };
+      const done = (ok) => {
+        clearTimeout(to);
+        if (!ok) {
+          /* v5.11.0：失败时把已经建起来的 Worker 收掉。原来只 resolve(false)，
+             超时/加载失败留下的 Worker 会一直占着内存，后续也无法重建。 */
+          this.disabled = true;
+          this.ready = false;
+          this.loading = null;
+          try { w.terminate(); } catch (e) {}
+          this.worker = null;
+          this.waiters.clear();
+        }
+        resolve(ok);
+      };
       const to = setTimeout(() => done(false), 90000);
       w.onmessage = (e) => {
         const d = e.data || {};
@@ -1297,9 +1348,18 @@ async function runPython() {
   const t0 = performance.now();
   /* v4.10：Worker 通道——终端式逐行交互（与 C++ 一致），运行中可随时停止 */
   if (pyMode === 'worker' && pyWorker && pyWorkerOk) {
-    const files = projectMode()
-      ? state.files.filter(f => f.name.endsWith('.py')).map(f => ({ name: f.name, content: f.content }))
-      : null;
+    /* v5.11.0：惰性文件可能还没读盘，直接发 null 会让 Worker 里的模块 import 失败；
+       这里先补齐内容，读不到的明确列出来，而不是静默丢失。 */
+    let files = null;
+    if (projectMode()) {
+      const pyFiles = state.files.filter(f => f.name.endsWith('.py'));
+      const missing = [];
+      for (const f of pyFiles) if (f.content === null && !ensureContent(f)) missing.push(f.name);
+      if (missing.length) {
+        outAppend('⚠ 以下文件读取失败，本次未注入：' + missing.join('、') + '\n', 'out-err');
+      }
+      files = pyFiles.filter(f => f.content !== null).map(f => ({ name: f.name, content: f.content }));
+    }
     pyOutCount = 0;
     const r = await new Promise((resolve) => {
       let settled = false;
@@ -1384,6 +1444,7 @@ function runCppTermux() {
   if (!target) { outAppend('找不到可运行的 C++ 文件。\n', 'out-err'); return; }
   const cfg = ProjectConfig.get();
   ProjectConfig.report();
+  if (!ProjectConfig.ensureApproved()) return;   // 安全审查 P1-8：首次运行带配置的项目需要确认
   const cxx = cfg.compiler || cppCompiler;
   const sources = ProjectConfig.extraSources(target.name);
   if (cfg.entry && cfg.entry !== state.active) outMeta(t('qc_using_entry').replace('{f}', cfg.entry));
@@ -1549,23 +1610,37 @@ function clearCodeErrors() {
   try { if (typeof setPanelProblems === 'function') setPanelProblems([]); } catch (e) {}   // v5.9.0
 }
 
-/** 解析 GCC/Clang 错误输出 → [{line, col, message}]（最多 6 处） */
+/** 解析 GCC/Clang 错误输出 → [{file, line, col, message}]（最多 6 处）
+ *  v5.11.0：路径允许含空格（项目目录/中文目录），并保留 file 身份，
+ *  否则多源项目里第二个 .cpp 的错误会被标到当前文件上。 */
 function parseCompileErrors(text, fileName) {
   const errs = [], seen = new Set();
   if (!text) return errs;
-  const base = (fileName || '').split('/').pop();
-  const re = /^(\S+?):(\d+):(?:(\d+):)?\s*(?:fatal\s+)?(?:error|错误|致命错误)\s*[：:]\s*(.*)$/gim;
+  const active = String(fileName || '').replace(/\\/g, '/');
+  const base = active.split('/').pop();
+  const baseDir = active.indexOf('/') >= 0 ? active.slice(0, active.lastIndexOf('/') + 1) : '';
+  const re = /^(.+?):(\d+):(?:(\d+):)?\s*(?:fatal\s+)?(?:error|错误|致命错误)\s*[：:]\s*(.*)$/gim;
   let m;
   while ((m = re.exec(text))) {
-    const file = m[1].split('/').pop();
+    const full = m[1].replace(/\\/g, '/').trim();
+    const file = full.split('/').pop();
     // 头文件的错误不标到主文件（如 #include 找不到 .h）；其余（当前文件 / 在线引擎的 prog.cc、main.cpp）均接受
     if (/\.(h|hpp|hh|tcc)$/i.test(file) && file !== base) continue;
     const line = parseInt(m[2], 10), col = parseInt(m[3] || '1', 10) || 1;
     const msg = m[4].trim();
-    const key = line + ':' + col + ':' + msg;
+    // 归一化成项目内相对路径：编译器常打印绝对路径（含临时目录）
+    let rel = full;
+    if (baseDir && full.indexOf(baseDir) === 0) rel = full.slice(baseDir.length);
+    else if (full.indexOf('/') >= 0) {
+      const byPath = (state.files || []).filter(f => full === f.name || full.endsWith('/' + f.name))
+        .sort((x, y) => y.name.length - x.name.length)[0];
+      const cand = byPath || (state.files || []).filter(f => f.name === file)[0];
+      rel = cand ? cand.name : file;
+    }
+    const key = rel + ':' + line + ':' + col + ':' + msg;   // v5.11.1：去重键带文件名
     if (seen.has(key)) continue;
     seen.add(key);
-    errs.push({ line, col, message: file + ':' + line + ':' + col + '  ' + msg });
+    errs.push({ file: rel, line, col, message: rel + ':' + line + ':' + col + '  ' + msg });
     if (errs.length >= 6) break;
   }
   return errs;
@@ -1632,17 +1707,37 @@ function showErrorBubble(err) {
     } catch (e) {}
   }, 90);
 }
-/** 标注错误集合：按行号排序全部标红 + 波浪线，跳转到最靠前的错误行并显示 5 秒泡 */
+/** 标注错误集合：只把属于当前文件的错误标进编辑器，全部错误进「问题」面板并带上文件名 */
 function showCodeErrors(errs) {
   if (!cm || !errs || !errs.length) return;
   const doc = cm.state.doc;
+  const active = String(state.active || '').replace(/\\/g, '/');
+  const activeBase = active.split('/').pop();
+  /* v5.11.0：多源项目里其它 .cpp 的错误不该标到当前文件上（行号根本对不上） */
+  const dupBase = errs.some(function (e) {
+    if (!e.file) return false;
+    const bs = e.file.split('/').pop();
+    return bs === activeBase && (state.files || []).filter(function (f) { return f.name.split('/').pop() === bs; }).length > 1;
+  });
+  const mine = errs.filter(function (e) {
+    if (!e.file) return true;
+    if (e.file === active) return true;
+    // 只有在项目内不存在同名文件时，才允许按文件名兜底（否则 a/util.cpp 与 b/util.cpp 会互相误标）
+    return !dupBase && e.file.split('/').pop() === activeBase;
+  });
+  try { setPanelProblems(errs); } catch (e) {}
   currentErrs = [];
-  for (const e of errs.slice().sort((a, b) => a.line - b.line)) {
+  for (const e of mine.slice().sort((a, b) => a.line - b.line)) {
     if (!e || e.line < 1 || e.line > doc.lines) continue;
     const l = doc.line(e.line);
     currentErrs.push({ line: e.line, col: e.col || 1, message: e.message, anchor: l.from, anchorEnd: l.to });
   }
-  if (!currentErrs.length) return;
+  if (!currentErrs.length) {
+    // v5.11.1：这一轮没有属于当前文件的错误时，旧的标红必须清掉
+    if (PCCM.clearErrors) { try { PCCM.clearErrors(cm); } catch (e) {} }
+    hideErrBubble();
+    return;
+  }
   /* v5.0：错误行若落在折叠块内，先展开，保证标红可见 */
   try {
     const M = window.PCCM && PCCM.modules;
@@ -1794,6 +1889,8 @@ function setRunning(v, kind) {
  * v5.10.0：项目配置 `.qingcode.json` + 运行会话状态机
  * ============================================================ */
 const PROJECT_CONFIG_FILE = '.qingcode.json';
+/* 安全审查 P1-8：可注入行为的环境变量一律拒绝 */
+const QC_ENV_BLOCKED = ['LD_PRELOAD', 'LD_LIBRARY_PATH', 'LD_AUDIT', 'PATH'];
 /** 项目配置：只做解析 + 校验，不执行任何东西；解析失败一律回落到默认值并报告原因 */
 const ProjectConfig = {
   _cacheKey: null, _cfg: null, _errs: [],
@@ -1842,7 +1939,8 @@ const ProjectConfig = {
       cfg.includeDirs.push(d.replace(/\/+$/, ''));
     }
     if (obj.compiler != null) {
-      if (typeof obj.compiler !== 'string' || !/^[A-Za-z0-9_.+\/-]+$/.test(obj.compiler)) errs.push(t('qc_bad_field').replace('{f}', 'compiler'));
+      /* 安全审查 P1-8：只允许裸可执行名（clang++ / g++ / c++），禁止路径与 .. */
+      if (typeof obj.compiler !== 'string' || !/^[A-Za-z0-9_.+-]+$/.test(obj.compiler)) errs.push(t('qc_bad_field').replace('{f}', 'compiler'));
       else cfg.compiler = obj.compiler.trim();
     }
     if (obj.standard != null) {
@@ -1855,6 +1953,8 @@ const ProjectConfig = {
       if (typeof obj.env !== 'object' || Array.isArray(obj.env)) errs.push(t('qc_bad_field').replace('{f}', 'env'));
       else for (const k of Object.keys(obj.env)) {
         if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) { errs.push(t('qc_bad_field').replace('{f}', 'env.' + k)); continue; }
+        /* 安全审查 P1-8：这些变量能改变动态链接器 / 命令解析，等于绕过编译器本身 */
+        if (QC_ENV_BLOCKED.indexOf(k.toUpperCase()) >= 0) { errs.push(t('qc_env_blocked').replace('{f}', k)); continue; }
         const v = obj.env[k];
         if (typeof v !== 'string' && typeof v !== 'number' && typeof v !== 'boolean') { errs.push(t('qc_bad_field').replace('{f}', 'env.' + k)); continue; }
         cfg.env[k] = String(v);
@@ -1899,6 +1999,48 @@ const ProjectConfig = {
   extraSources(entry) {
     const cfg = this.get();
     return cfg.sources.filter(s => s !== entry);
+  },
+  /** 配置指纹：项目路径 + 配置内容哈希 + 长度（安全审查 P1-8：按「项目 + 配置」记住确认结果） */
+  approvalKey() {
+    const text = this.source();
+    if (text === null) return null;
+    let h = 5381;
+    for (let i = 0; i < text.length; i++) h = ((h * 33) ^ text.charCodeAt(i)) >>> 0;
+    return (projectMode() ? projectRoot : 'default') + '#' + h.toString(16) + '#' + text.length;
+  },
+  approved() {
+    const k = this.approvalKey();
+    if (!k) return true;
+    try { return (JSON.parse(localStorage.getItem('pc_qc_approved') || '[]') || []).indexOf(k) >= 0; }
+    catch (e) { return false; }
+  },
+  markApproved() {
+    const k = this.approvalKey();
+    if (!k) return;
+    try {
+      const arr = JSON.parse(localStorage.getItem('pc_qc_approved') || '[]') || [];
+      if (arr.indexOf(k) < 0) arr.push(k);
+      localStorage.setItem('pc_qc_approved', JSON.stringify(arr.slice(-20)));
+    } catch (e) {}
+  },
+  /** 带配置的项目首次运行前确认一次（配置变了会重新确认） */
+  ensureApproved() {
+    if (this.source() === null) return true;      // 没有配置文件，不需要确认
+    if (this.approved()) return true;
+    const cfg = this.get();
+    const bits = [];
+    if (cfg.compiler) bits.push('compiler = ' + cfg.compiler);
+    if (cfg.standard) bits.push('standard = ' + cfg.standard);
+    if (cfg.flags.length) bits.push('flags = ' + cfg.flags.join(' '));
+    if (cfg.args.length) bits.push('args = ' + cfg.args.join(' '));
+    if (cfg.cwd) bits.push('cwd = ' + cfg.cwd);
+    if (Object.keys(cfg.env).length) bits.push('env = ' + JSON.stringify(cfg.env));
+    showModal({
+      title: t('qc_confirm_title'), withInput: false, okText: t('qc_confirm_ok'),
+      desc: t('qc_confirm_desc') + '  ' + bits.join(' · '), showCancel: true
+    });
+    modalMode = 'qc-approve';
+    return false;
   },
   report() {
     const errs = this.errors();
@@ -2018,6 +2160,14 @@ async function runCurrent() {
     if (pyEngine === 'online') {
       if (projectMode()) outMeta('提示：在线引擎暂不支持 import 项目内其他文件；需项目内互相调用请切换 Python 引擎为「内置 Pyodide」。');
       await runPythonOnline(); setRunning(false); return;
+    }
+    /* v5.10.1 安全（审查 P0-4）：主线程模式下用户代码 `import js` 就能调 js.Android.execTermux，
+       等于绕过插件权限与 Termux 确认。缺少跨域隔离时不再静默回退，直接拒绝运行并说明原因。 */
+    if (!pyWorkerSupported() || pyMode === 'main') {
+      outAppend('⚠ ' + t('py_no_isolation') + '\n', 'out-err');
+      outMeta(t('py_no_isolation_hint'));
+      setRunning(false);
+      return;
     }
     const ok = await ensurePyodide();
     if (!ok) { setRunning(false); return; }
@@ -2216,6 +2366,28 @@ function ensureAllContent() {
     if (ensureContent(f)) { n++; bytes += sz; }
   }
   return n;
+}
+/** v5.11.0：分片补读。全局搜索打开时一次性同步读几十个文件会卡住主线程，
+ *  这里每片最多 8 个文件，片与片之间让出事件循环，完成后回调。 */
+function ensureAllChunked(done) {
+  let i = 0, bytes = 0;
+  const step = function () {
+    /* v5.11.1：按「尝试次数」分片，不按成功数。原来只有 ensureContent 成功才 n++，
+       遇到读失败或预算跳过的文件时 n 永远到不了 8，一口气把剩余文件全读完，
+       分片等于失效（正是这次优化要消除的同步阻塞）。 */
+    let tries = 0;
+    while (i < state.files.length && tries < 8) {
+      tries++;
+      const f = state.files[i++];
+      if (f.content !== null) continue;
+      const sz = f._size || 0;
+      if (bytes + sz > ENSURE_ALL_BUDGET) continue;
+      if (ensureContent(f)) bytes += sz;
+    }
+    if (i < state.files.length) setTimeout(step, 0);
+    else if (done) done();
+  };
+  step();
 }
 
 let pendingRestore = null;   // 启动恢复时暂存的工作区元数据，等 readProject 回调后应用
@@ -2475,6 +2647,27 @@ window.__onSingleFileLoaded = function (data) {
 }
 
 function closeProject() {
+  if (!projectMode()) return;
+  /* v5.11.0：以前直接清草稿走人，未保存的修改当场丢失。现在先提示，用户确认保存后才关。 */
+  const dirty = state.files.filter(f => f.content !== null && f._saved !== undefined && f.content !== f._saved);
+  if (dirty.length) {
+    modalMode = 'closeProject';
+    modalTarget = null;
+    showModal({
+      title: t('close_project_title'),
+      withInput: false,
+      okText: t('close_project_save'),
+      desc: t('close_project_dirty').replace('{n}', dirty.length)
+        + '（' + dirty.slice(0, 3).map(f => f.name).join('、') + (dirty.length > 3 ? ' …' : '') + '）',
+      showCancel: true
+    });
+    return;
+  }
+  doCloseProject();
+}
+
+/** 真正关闭项目空间：清理该项目的草稿并恢复默认示例 */
+function doCloseProject() {
   const oldRoot = projectRoot;
   projectRoot = null;
   /* v5.5.0：主动关闭项目 → 丢弃该工作区的未保存草稿，避免下次恢复时又冒出来 */
@@ -3149,6 +3342,10 @@ const EditorAPI = {
   get view() { return cm; },
   get modules() { return (window.PCCM && PCCM.modules) || {}; },
   currentLanguage() { return EditorAPI._ownLang || hlLangOf(state.active); },
+  /* v5.11.0：插件/问题面板需要「先切文件再跳行」的入口 */
+  openFile(name) { openFile(name); },
+  /** 当前文档标识：插件缓存 / 语言服务用它区分文件 */
+  documentUri() { return state.active || ''; },
   /* 插件可强制指定语言（影响补全/格式化）；切文件时由 openFile 清空 */
   _ownLang: null,
   addExtension(ext) { if (ext) { PCExtEntries.push({ ext: ext, owner: PCPluginCurrent }); pcApplyExts(); } return ext; },
@@ -3197,11 +3394,15 @@ const EditorAPI = {
   files() { return state.files.map(function (f) { return { name: f.name, content: f.content, lazy: f.content === null, size: f._size == null ? null : f._size }; }); },
   /** v5.6.0：把惰性文件全部读入内存（全局搜索 / 全局符号需要），返回本次加载数量 */
   ensureAll() { return ensureAllContent(); },
+  ensureAllAsync(done) { ensureAllChunked(done); },   // v5.11.0：不阻塞主线程的补读
   activeFileName() { return state.active; },
   openFile(name) { try { if (name && name !== state.active) { openFile(name); return true; } } catch (e) {} return false; },
   setFileContent(name, content) {
     const f = state.files.find(function (x) { return x.name === name; });
     if (!f) return false;
+    /* v5.11.1：未加载的惰性文件不允许被「写入」——调用方拿到的 content 是 null，
+       任何基于它的改写都会把 null 的字符串形式当成正文落盘，覆盖真实文件。 */
+    if (f.content === null) return false;
     f.content = String(content == null ? '' : content);
     f._lazy = false;   // v5.6.0：插件写入后视为已加载
     viewStates.delete(name);   // v5.7.0：内容由插件改写，旧视图状态作废
@@ -3421,7 +3622,8 @@ window.PCPluginAPI = {
  * ============================================================ */
 const PLUGIN_TRUST_KEY = 'pc_plugin_trust';
 const PLUGIN_PERM_KEYS = ['storage', 'network', 'workspace', 'termux'];
-const PLUGIN_DEFAULT_PERMS = { storage: false, network: true, workspace: true, termux: false };
+/* v5.10.1 安全（审查 P0-1）：默认全 false——网络与工作区读写也必须由用户显式勾选 */
+const PLUGIN_DEFAULT_PERMS = { storage: false, network: false, workspace: false, termux: false };
 const pluginInfos = new Map();   // name -> { name, size, mtime, sha256, cacheSha256 }（本次启动读取）
 
 function normPerms(p) {
@@ -3503,20 +3705,41 @@ function isPluginSandboxed(name) {
   return SandboxHost.inlineList().indexOf(name) < 0;
 }
 /** 取可执行源码：批准版本优先用私有副本；否则用共享文件并同步留底 */
-function resolvePluginSource(name, info, state) {
-  if (state === 'stale-shared') {
-    let c = ''; try { c = (Android.readPluginCopy && Android.readPluginCopy(name)) || ''; } catch (e) { c = ''; }
-    return c || null;
-  }
-  let src = '';
-  try { src = Android.readPlugin(name) || ''; } catch (e) { src = ''; }
-  if (!src) return null;
+/**
+ * 安全审查 P0-6：读取插件源码时，内容与哈希必须来自「同一次读取」。
+ * 旧实现先由 pluginInfo 算一次哈希、再由 readPlugin 读一次内容，两次之间文件可被替换（TOCTOU）。
+ * 返回 { content, sha256 }；不一致或读不到返回 null（调用方必须拒绝执行）。
+ */
+function readVerifiedPlugin(name, fromCopy) {
   try {
-    if (window.Android && Android.cachePluginCopy && (!info || info.cacheSha256 !== info.sha256)) {
-      Android.cachePluginCopy(name, src);   // 批准版本留底，共享目录以后被改也能继续跑这份
-    }
-  } catch (e) {}
-  return src;
+    const fn = fromCopy ? 'readPluginCopyVerified' : 'readPluginVerified';
+    if (!(window.Android && Android[fn])) return null;
+    const raw = Android[fn](name);
+    if (!raw) return null;
+    const o = JSON.parse(raw);
+    if (!o || typeof o.content !== 'string' || !o.sha256) return null;
+    return { content: o.content, sha256: String(o.sha256) };
+  } catch (e) { return null; }
+}
+function resolvePluginSource(name, info, state) {
+  const rec = PluginTrust.get(name);
+  if (!rec || !rec.sha256) return null;
+  const fromCopy = state === 'stale-shared';
+  const v = readVerifiedPlugin(name, fromCopy);
+  if (!v) return null;
+  /* 内容与批准记录不一致 → 拒绝执行（宁可让插件停用，也不执行没批准过的代码） */
+  if (v.sha256 !== String(rec.sha256)) {
+    if (Android.appendLog) Android.appendLog('js', 'plugin hash mismatch on read: ' + name);
+    return null;
+  }
+  if (!fromCopy) {
+    try {
+      if (window.Android && Android.cachePluginCopy && (!info || info.cacheSha256 !== v.sha256)) {
+        Android.cachePluginCopy(name, v.content);   // 用同一份内容留底，共享目录以后被改也能继续跑这份
+      }
+    } catch (e) {}
+  }
+  return v.content;
 }
 /** 旧版信任数据迁移：只有「此前确实被用户启用过」的插件才继承授权（迁移时记录当前哈希） */
 function migrateLegacyPluginTrust(infos) {
@@ -3532,7 +3755,9 @@ function migrateLegacyPluginTrust(infos) {
     if (!n || all[n] || !info.sha256) continue;
     if (seen.indexOf(n) < 0 || disabled.indexOf(n) >= 0) continue;
     PluginTrust.approve(n, info,
-      { storage: true, network: true, workspace: true, termux: true },   // 旧版没有权限模型，实际等同全权
+      /* v5.10.1 安全（审查 P0-1）：迁移不再默认全权，一律按最小权限记 false；
+         用户需要在插件管理页重新勾选需要的权限 */
+      { storage: false, network: false, workspace: false, termux: false },
       inline.indexOf(n) >= 0 ? 'inline' : 'sandbox');
     migrated++;
   }
@@ -4131,6 +4356,31 @@ function pluginTrustSection(name) {
   }
   box.appendChild(head);
 
+  /* v5.10.1 安全（审查 P0-1）：主线程插件根本不受权限约束——它能直接摸到 window.Android，
+     勾选框只会给人「已隔离」的错觉。这里改成只读提示，不提供可勾选项。 */
+  const inlineMode = !isPluginSandboxed(name);
+  if (inlineMode) {
+    const warn = document.createElement('div');
+    warn.className = 'pp-card-meta';
+    warn.style.color = '#f0cd8a';
+    warn.textContent = t('pp_trust_inline_note');
+    box.appendChild(warn);
+    if (rec && (state === 'approved' || state === 'stale-shared')) {
+      const v = document.createElement('div'); v.className = 'pp-card-meta';
+      v.textContent = '(v' + (rec.version || 1) + ')';
+      box.appendChild(v);
+      return box;
+    }
+    const foot0 = document.createElement('div'); foot0.className = 'pp-card-foot';
+    const btn0 = document.createElement('button');
+    btn0.className = 'pp-btn pp-btn-primary';
+    btn0.textContent = t('pp_trust_approve');
+    btn0.addEventListener('click', function () { approvePlugin(name, normPerms(PLUGIN_DEFAULT_PERMS)); });
+    foot0.appendChild(btn0);
+    box.appendChild(foot0);
+    return box;
+  }
+
   if (rec && (state === 'approved' || state === 'stale-shared')) {
     const p = normPerms(rec.permissions);
     const granted = PLUGIN_PERM_KEYS.filter(k => p[k]);
@@ -4142,7 +4392,7 @@ function pluginTrustSection(name) {
     return box;
   }
 
-  /* 未授权 / 内容已变化：逐项勾选权限后授权 */
+  /* 未授权 / 内容已变化：逐项勾选权限后授权（默认全不勾） */
   const pick = document.createElement('div'); pick.className = 'pp-perm-pick';
   const dft = normPerms(PLUGIN_DEFAULT_PERMS);
   const boxes = {};
@@ -4285,6 +4535,7 @@ function renderSettingsTab(body) {
   body.appendChild(reserve);
 }
 /** v5.9.0：从 HTTPS 链接安装插件。只负责下载与落盘，授权仍需用户在卡片上勾选权限。 */
+let pendingInstall = null;   // v5.10.1（审查 P1-10）：等待用户确认的安装任务
 async function installPluginFromUrl(url) {
   const u = String(url || '').trim();
   if (!/^https:\/\/[^\s]+$/i.test(u)) { outAppend('⚠ ' + t('pp_install_bad_url') + '\n', 'out-err'); return false; }
@@ -4307,6 +4558,40 @@ async function installPluginFromUrl(url) {
     return false;
   }
   clearTimeout(timer);
+  /* 安全审查 P1-10：安装前先给出指纹与源码片段，再让用户确认一次。
+     下载完成不等于可信——这一步就是给「来源是否可信」留一个明确的判断点。 */
+  let hex = '';
+  try { hex = await sha256Hex(text); } catch (e) { hex = ''; }
+  const lines = String(text).split('\n').slice(0, 50).join('\n');
+  pendingInstall = { name: name, text: text, hex: hex };
+  showModal({
+    title: t('pp_install_confirm_title'), withInput: false, okText: t('pp_install_confirm_ok'),
+    desc: t('pp_install_confirm_desc')
+      .replace('{name}', name)
+      .replace('{h}', hex ? hex.slice(0, 16) + '…' : '?')
+      + '\n\n' + lines,
+    showCancel: true
+  });
+  modalMode = 'plugin-install';
+  return true;
+}
+
+/** SHA-256（十六进制）；环境不支持时返回空串，不影响流程但会显示 "?" */
+async function sha256Hex(text) {
+  try {
+    if (!(window.crypto && crypto.subtle)) return '';
+    const buf = new TextEncoder().encode(String(text));
+    const d = await crypto.subtle.digest('SHA-256', buf);
+    return Array.from(new Uint8Array(d)).map(function (b) { return ('0' + b.toString(16)).slice(-2); }).join('');
+  } catch (e) { return ''; }
+}
+
+/** 用户在确认框点了「安装」之后才真正落盘 */
+async function finishPluginInstall() {
+  const pi = pendingInstall;
+  pendingInstall = null;
+  if (!pi) return false;
+  const name = pi.name, text = pi.text;
   let ok = false;
   try { ok = Android.writePlugin(name, text); } catch (e) { ok = false; }
   if (!ok) { outAppend('⚠ ' + t('pp_install_fail') + name + '\n', 'out-err'); return false; }
@@ -4390,8 +4675,29 @@ function doDelete() {
   showModal({ title: t('delete_q') + target + t('delete_q2'), withInput: false, okText: t('delete_btn'), desc: t('irreversible') });
   modalMode = 'confirm';
 }
+/** v5.11.1：这条记录在磁盘上是否真的存在。
+ *  外部「打开文件」引入的项目外文件、空项目自动补的占位文件都只存在于内存，
+ *  不能因为磁盘上没有就拒绝重命名 / 删除。 */
+function onDisk(rel) {
+  try {
+    if (!projectMode() || typeof Android === 'undefined' || !Android.statFile) return true;
+    return !!Android.statFile(projectRoot + '/' + rel);
+  } catch (e) { return true; }
+}
+
 function modalOk() {
   const name = $('modal-input').value.trim();
+  if (modalMode === 'qc-approve') {
+    ProjectConfig.markApproved();
+    hideModal();
+    runCppTermux();
+    return;
+  }
+  if (modalMode === 'plugin-install') {
+    hideModal();
+    finishPluginInstall();
+    return;
+  }
   if (modalMode === 'new') {
     const err = validName(name);
     if (err) { $('modal-error').textContent = err; return; }
@@ -4399,38 +4705,63 @@ function modalOk() {
     openFile(name); closeSidebar(); hideModal();
   } else if (modalMode === 'rename') {
     const old = modalTarget || state.active;
-    if (name === old) { hideModal(); return; }
-    const err = validName(name);
-    if (err) { $('modal-error').textContent = err; return; }
+    /* v5.11.1：子目录里的文件（sub/a.py）只允许改文件名。此前把「含 / 的完整路径」
+       直接丢给 validName（拒绝 /），又不带目录传给原生桥（dirOf 不等），两条路都走不通。 */
+    const dir = old.indexOf('/') >= 0 ? old.slice(0, old.lastIndexOf('/') + 1) : '';
+    const newName = dir + name;
+    if (newName === old) { hideModal(); return; }
+    if (!name) { $('modal-error').textContent = t('need_name'); return; }
+    if (/[\\/:*?"<>|]/.test(name)) { $('modal-error').textContent = t('bad_chars'); return; }
+    if (name.length > 60) { $('modal-error').textContent = t('too_long'); return; }
+    if (state.files.some(f => f.name === newName)) { $('modal-error').textContent = t('dup_name'); return; }
     const target = state.files.find(x => x.name === old);
     if (!target) { hideModal(); return; }
+    /* v5.11.0：项目模式下改名必须真的改到磁盘，否则重开项目旧文件还在。
+       v5.11.1：磁盘上本来就没有这条记录（外部打开的文件 / 内存占位）时，只改内存，不拦。 */
+    if (projectMode() && typeof Android !== 'undefined' && Android.renameProjectEntry) {
+      let ok = false;
+      try { ok = Android.renameProjectEntry(projectRoot, old, newName); } catch (e) { ok = false; }
+      if (!ok && onDisk(old)) { $('modal-error').textContent = t('rename_disk_fail'); return; }
+    }
     /* v5.6.0：重命名要迁移草稿键，并把磁盘签名置空（磁盘上仍是旧文件名）
        v5.7.0：标签与视图状态同样迁移，否则切回来会找不到状态 */
     const oldDraftKey = draftKey(old);
-    target.name = name;
+    target.name = newName;
     target._sig = null;
     const ti = tabList().indexOf(old);
-    if (ti >= 0) tabList()[ti] = name;
+    if (ti >= 0) tabList()[ti] = newName;
     const vs = viewStates.get(old);
-    if (vs) { viewStates.delete(old); viewStates.set(name, vs); }
-    if (state.active === old) state.active = name;
+    if (vs) { viewStates.delete(old); viewStates.set(newName, vs); }
+    if (state.active === old) state.active = newName;
     if (projectMode()) {
       DraftStore.del(oldDraftKey);
-      if (target.content !== null && target.content !== target._saved) DraftStore.put(draftKey(name), target.content);
+      if (target.content !== null && target.content !== target._saved) DraftStore.put(draftKey(newName), target.content);
     }
-    if (state.active === name) openFile(name); else { renderTabs(); saveStore(); }
+    if (state.active === newName) openFile(newName); else { renderTabs(); renderFileList(); saveStore(); }
     modalTarget = null;
     hideModal();
+  } else if (modalMode === 'closeProject') {
+    autoSaveProject(true);
+    const still = state.files.filter(f => f.content !== null && f._saved !== undefined && f.content !== f._saved);
+    if (still.length) { $('modal-error').textContent = t('close_project_fail'); return; }
+    hideModal();
+    doCloseProject();
   } else if (modalMode === 'confirm') {
     const gone = modalTarget || state.active;
     const wasActive = (gone === state.active);
+    /* v5.11.0：项目模式下先删磁盘，失败就停在这里，避免「界面上没了、磁盘上还在」 */
+    if (projectMode() && typeof Android !== 'undefined' && Android.deleteProjectEntry) {
+      let ok = false;
+      try { ok = Android.deleteProjectEntry(projectRoot, gone); } catch (e) { ok = false; }
+      if (!ok && onDisk(gone)) { $('modal-error').textContent = t('delete_disk_fail'); return; }
+    }
     state.files = state.files.filter(x => x.name !== gone);
     if (projectMode()) DraftStore.del(draftKey(gone));   // v5.6.0：删除文件同时清理草稿
     dropTab(gone);                                       // v5.7.0：标签一起关掉
     if (!state.files.length) state.files.push({ name: 'main.py', content: PY_DEFAULT_CODE, _saved: PY_DEFAULT_CODE });
     if (!tabList().length) state.tabs = [state.files[0].name];
     if (wasActive || !state.files.some(f => f.name === state.active)) openFile(tabList()[0]);
-    else { renderTabs(); saveStore(); }
+    else { renderTabs(); renderFileList(); saveStore(); }   // v5.11.1：非活动文件删除后侧栏也要刷新
     modalTarget = null;
     hideModal();
   }
@@ -4674,6 +5005,26 @@ function buildInstallCmd(kind, needSrc) {
  *  失败重试、后装 Termux 的接管全部由 startTermuxGuard() 后台守护循环负责。
  *  v4.11.1：检测顺带报告 apt 源 / pip 源是否为清华镜像，安装命令自动先切源（国内加速）。
  *  返回 { ready, absent, failed, bg }。 */
+/**
+ * v5.10.1 安全（审查 P0-2）：后台环境检测不该触发「执行 Termux 命令」的确认弹窗，
+ * 因此优先走原生固定探针（不接受参数，输出到固定文件）；老版本原生没有该接口时回退 runCapture。
+ */
+async function termuxProbeRun() {
+  if (window.Android && Android.probeTermuxEnv && Android.readEnvProbe) {
+    try {
+      if (!Android.probeTermuxEnv()) return { code: -1, output: '' };
+      const deadline = Date.now() + 20000;
+      while (Date.now() < deadline) {
+        await new Promise(function (r) { setTimeout(r, 400); });
+        const out = Android.readEnvProbe() || '';
+        if (out.indexOf('DONE') >= 0) return { code: 0, output: out };
+      }
+      return { code: -1, output: '' };
+    } catch (e) { /* 回退 */ }
+  }
+  return window.PCPluginAPI.runCapture(TERMUX_PROBE);
+}
+
 const TERMUX_PROBE =
   'echo py:$(command -v python >/dev/null 2>&1 && echo ok || echo missing);' +
   'echo cpp:$(command -v clang >/dev/null 2>&1 && echo ok || echo missing);' +
@@ -4699,7 +5050,7 @@ async function autoTermuxSetup(manual, opts) {
       ? (LANG === 'en' ? 'Checking Termux environment (python / clang)…' : '正在检测 Termux 环境（python / clang）…')
       : (LANG === 'en' ? 'Checking Termux env in background…' : '正在后台检测 Termux 环境（python / clang）…'));
     onP(10, 'splash_tx_check');
-    const r = await window.PCPluginAPI.runCapture(TERMUX_PROBE);
+    const r = await termuxProbeRun();
     const out = (r && r.output) || '';
     const pyOk = /py:ok/.test(out), cppOk = /cpp:ok/.test(out);
     const needPy = /py:missing/.test(out), needCpp = /cpp:missing/.test(out);
@@ -4783,7 +5134,7 @@ async function termuxGuardTick() {
   termuxGuard.busy = true;
   try {
     let r = null;
-    try { r = await window.PCPluginAPI.runCapture(TERMUX_PROBE); } catch (e) { r = null; }
+    try { r = await termuxProbeRun(); } catch (e) { r = null; }
     const out = (r && r.output) || '';
     // 检测失败 / Termux 忙（命令排队）：本轮放弃，下一轮自动重试
     if (!(r && r.code === 0 && /py:(ok|missing)/.test(out) && /cpp:(ok|missing)/.test(out))) return;
@@ -5004,7 +5355,12 @@ $('modal-ok').addEventListener('click', () => {
   if (modalMode === 'info') { hideModal(); return; }
   _modalOk();
 });
-$('modal-cancel').addEventListener('click', hideModal);
+$('modal-cancel').addEventListener('click', function () {
+  // v5.11.1：取消要复位 modalMode，否则残留的模式会被下一次「只调 showModal 不设模式」的入口误用
+  modalMode = '';
+  modalTarget = null;
+  hideModal();
+});
 $('modal-mask').addEventListener('click', (e) => { if (e.target === $('modal-mask')) hideModal(); });
 $('modal-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('modal-ok').click(); });
 

@@ -270,6 +270,12 @@ public class MainActivity extends Activity {
                 h.put("Cross-Origin-Resource-Policy", "cross-origin");
                 // 大文件长缓存（wasm/js/zip），让 WebView 磁盘缓存 + WASM 编译缓存生效
                 h.put("Cache-Control", cacheControlOf(asset));
+                /* 安全审查 P0-5：沙箱 Worker 只允许执行代码，禁止任何网络访问与外链资源。
+                   这样即使插件在 Worker 内拿到源码，也无法把内容外传。 */
+                if (asset.endsWith("sandbox-worker.js")) {
+                    h.put("Content-Security-Policy",
+                            "default-src 'none'; script-src 'unsafe-eval'; connect-src 'none'");
+                }
                 WebResourceResponse resp = new WebResourceResponse(mimeOf(asset), "utf-8", is);
                 resp.setResponseHeaders(h);
                 return resp;
@@ -600,8 +606,21 @@ public class MainActivity extends Activity {
             cppFifoName = ".pc_in_" + sessSan;
             if (cppFifoName.length() < 7) cppFifoName = ".pc_in";
             cppBinName = sessSan.isEmpty() ? "" : "pc_prog_" + sessSan + ".out";
-            if (!writeFile(new File(dir, fileName), code)) {
-                alog("runCppEx: FAIL write " + new File(dir, fileName).getAbsolutePath());
+            /* 安全审查 P1-7：写盘用 safeRelativePath 校验过的 entryRel（不是原始 fileName），
+               并再确认规范化路径仍落在会话目录内。 */
+            File entryFile = new File(dir, entryRel);
+            try {
+                if (!entryFile.getCanonicalPath().startsWith(dir.getCanonicalPath() + File.separator)) {
+                    alog("runCppEx: rejected entry outside session dir: " + entryRel);
+                    emitCpp(cppJson("setup", false, 0, "", "主文件路径非法：" + fileName));
+                    return true;
+                }
+            } catch (Exception e) {
+                emitCpp(cppJson("setup", false, 0, "", "主文件路径无法解析：" + fileName));
+                return true;
+            }
+            if (!writeFile(entryFile, code)) {
+                alog("runCppEx: FAIL write " + entryFile.getAbsolutePath());
                 emitCpp(cppJson("setup", false, 0, "", "无法写入交换目录 " + dir.getAbsolutePath()));
                 return true;
             }
@@ -615,16 +634,20 @@ public class MainActivity extends Activity {
 
             /* ---- 字面量参数（全部在生成期用单引号包好，运行时按字面传递，不经二次解析） ---- */
             StringBuilder srcLit = new StringBuilder();
-            for (String r : rels) { if (srcLit.length() > 0) srcLit.append(' '); srcLit.append(q(r)); }
+            for (String r : rels) {
+                if (srcLit.length() > 0) srcLit.append(' ');
+                /* 用 "$W/" + 单引号文件名拼接：既能展开变量，又不会被文件名里的 $ 之类干扰 */
+                srcLit.append("\"$W/\"").append(q(r));
+            }
             StringBuilder hashLit = new StringBuilder();
             for (String r : rels) {
-                hashLit.append(" echo ").append(q("== " + r)).append("; cat -- ").append(q(r)).append(" 2>/dev/null;");
+                hashLit.append(" echo ").append(q("== " + r)).append("; cat -- \"$W/\"").append(q(r)).append(" 2>/dev/null;");
             }
             StringBuilder incLit = new StringBuilder();
             JSONArray incs = o.optJSONArray("includeDirs");
             if (incs != null) for (int i = 0; i < incs.length(); i++) {
                 String d = safeRelativePath(incs.optString(i, ""));
-                if (d != null) incLit.append(" -I").append(q(d));
+                if (d != null) incLit.append(" -I\"$W/\"").append(q(d));
             }
             StringBuilder flagLit = new StringBuilder();
             JSONArray flags = o.optJSONArray("flags");
@@ -649,7 +672,7 @@ public class MainActivity extends Activity {
                 }
             }
             String cwdRel = safeRelativePath(o.optString("cwd", ""));
-            String cwdLine = (cwdRel == null) ? "cd \"$PC\"" : "cd \"$PC/" + cwdRel + "\" 2>/dev/null || cd \"$PC\"";
+            String cwdLine = (cwdRel == null) ? "cd \"$W\"" : "cd \"$W/" + cwdRel + "\" 2>/dev/null || cd \"$PC\"";
 
             /* ---- 运行段落（重跑时原样复用，故只依赖变量与字面量） ---- */
             String runTail =
@@ -677,6 +700,7 @@ public class MainActivity extends Activity {
                 "CACHE=\"$HOME/.pc_cache\"\n" +
                 "PC_MAX_ENTRIES=" + maxEntries + "\n" +
                 "PC_MAX_KB=" + (maxMB * 1024) + "\n" +
+                "W=\"$HOME/.pc_work/" + (sessSan.isEmpty() ? "adhoc" : sessSan) + "\"\n" +
                 "CXX=" + q(cxx) + "\n" +
                 "PCSTD=" + q("-std=" + std) + "\n" +
                 "prune_cache() {\n" +
@@ -697,6 +721,10 @@ public class MainActivity extends Activity {
                 "echo \"[$(date +%H:%M:%S)] termux script start\" >> \"$PC/.termux.log\"\n" +
                 "cd \"$PC\" || { echo \"[$(date +%H:%M:%S)] cd FAILED\" >> \"$PC/.termux.log\"; exit 9; }\n" +
                 "if [ -f \"$PC/.cancel\" ]; then rm -f \"$PC/.cancel\"; echo \"[$(date +%H:%M:%S)] cancelled while queued\" >> \"$PC/.termux.log\"; exit 0; fi\n" +
+                /* 安全审查 P1-9：交换目录在共享存储里，别的应用可以改。先整份复制到应用私有目录，
+                   之后的哈希与编译都只针对这份私有副本。 */
+                "rm -rf \"$W\"; mkdir -p \"$W\"\n" +
+                "cp -a \"$PC\"/. \"$W\"/ 2>/dev/null\n" +
                 watchdogScript() +
                 "command -v \"$CXX\" >/dev/null 2>&1 || { echo '[首次运行：自动安装编译器，约1-3分钟...]'; pkg install -y " +
                 (cxx.equals("g++") ? "clang" : "clang") + " 2>&1 | tail -1; }\n" +
@@ -775,6 +803,9 @@ public class MainActivity extends Activity {
                 "PCBIN=" + q(pcBin) + "\n" +
                 "BIN=\"$HOME/$PCBIN\"\n" +
                 "CACHE=\"$HOME/.pc_cache\"\n" +
+                /* 重跑复用同一段运行脚本，它引用了 $W（cwd 基准），这里补上定义 */
+                "W=\"$HOME/.pc_work/rerun\"\n" +
+                "mkdir -p \"$W\" 2>/dev/null\n" +
                 "H=" + q(lastCacheKey) + "\n" +
                 "echo \"[$(date +%H:%M:%S)] rerun (no compile) key=$H\" >> \"$PC/.termux.log\"\n" +
                 "cd \"$PC\" || exit 9\n" +
@@ -1197,7 +1228,123 @@ public class MainActivity extends Activity {
         /** 通用 Termux 命令执行（插件运行其他语言的底层原语；返回 false = 未发出，如被系统拦截） */
         @JavascriptInterface
         public boolean execTermux(final String script, final boolean background) {
+            if (script == null) return false;
+            /* 安全审查 P0-2：Termux 命令执行前必须由用户确认一次（每个会话一次）。
+               这是原生桥层的能力，插件拿到的 API 裁剪不能替代这一层。 */
+            if (!ensureTermuxConfirmed(script)) {
+                alog("execTermux: denied (user or timeout)");
+                return false;
+            }
             return sendRunCommand(script, background);
+        }
+
+        /** 安全审查 P0-2：固定探针——不接受参数，因此可以跳过确认；插件即使调用也做不了别的。
+         *  结果写到固定的交换目录文件，前端用 readEnvProbe() 轮询（后台环境检测不该弹确认框）。 */
+        @JavascriptInterface
+        public boolean probeTermuxEnv() {
+            try {
+                File out = new File(swapDir(), PROBE_OUT_NAME);
+                try { if (out.exists()) out.delete(); } catch (Exception ignored) { }
+                String script = "exec > " + q(out.getAbsolutePath()) + " 2>&1\n"
+                        + TERMUX_PROBE_SCRIPT + "\necho DONE\n";
+                return sendRunCommand(script, true);
+            } catch (Exception e) { alog("probeTermuxEnv EX " + e); return false; }
+        }
+
+        /** 读取固定探针的输出（未生成返回 ""） */
+        @JavascriptInterface
+        public String readEnvProbe() {
+            try {
+                File f = new File(swapDir(), PROBE_OUT_NAME);
+                return f.isFile() ? readTextFile(f) : "";
+            } catch (Exception e) { return ""; }
+        }
+
+        /** 安全审查 P0-6：一次读取同时给出内容与哈希。
+         *  旧实现是「先 pluginInfo 算哈希、再 readPlugin 读内容」，两次读取之间文件可被替换（TOCTOU）。 */
+        @JavascriptInterface
+        public String readPluginVerified(String name) {
+            try {
+                if (name == null || !name.matches("[A-Za-z0-9_\\.\\-]+\\.js")) return "";
+                File f = new File(new File(swapDir(), "plugins"), name);
+                if (!f.isFile()) return "";
+                byte[] raw = readBytes(f);
+                if (raw == null) return "";
+                java.security.MessageDigest md = java.security.MessageDigest.getInstance("SHA-256");
+                byte[] h = md.digest(raw);
+                StringBuilder sb = new StringBuilder(h.length * 2);
+                for (byte b : h) sb.append(Character.forDigit((b >> 4) & 0xF, 16)).append(Character.forDigit(b & 0xF, 16));
+                return new org.json.JSONObject()
+                        .put("content", new String(raw, "UTF-8"))
+                        .put("sha256", sb.toString())
+                        .toString();
+            } catch (Exception e) { alog("readPluginVerified EX " + e); return ""; }
+        }
+
+        /** 安全审查 P0-6：私有副本的一次性校验读取（用于「共享文件已更新、仍跑已批准副本」的情形） */
+        @JavascriptInterface
+        public String readPluginCopyVerified(String name) {
+            try {
+                if (name == null || !name.matches("[A-Za-z0-9_\\.\\-]+\\.js")) return "";
+                File f = new File(pluginCacheDir(), name);
+                if (!f.isFile()) return "";
+                byte[] raw = readBytes(f);
+                if (raw == null) return "";
+                java.security.MessageDigest md = java.security.MessageDigest.getInstance("SHA-256");
+                byte[] h = md.digest(raw);
+                StringBuilder sb = new StringBuilder(h.length * 2);
+                for (byte x : h) sb.append(Character.forDigit((x >> 4) & 0xF, 16)).append(Character.forDigit(x & 0xF, 16));
+                return new org.json.JSONObject()
+                        .put("content", new String(raw, "UTF-8"))
+                        .put("sha256", sb.toString())
+                        .toString();
+            } catch (Exception e) { alog("readPluginCopyVerified EX " + e); return ""; }
+        }
+
+        /** 一次性把文件读成字节（与哈希同源，避免二次读取） */
+        private byte[] readBytes(File f) {
+            java.io.FileInputStream in = null;
+            try {
+                in = new java.io.FileInputStream(f);
+                java.io.ByteArrayOutputStream bo = new java.io.ByteArrayOutputStream();
+                byte[] buf = new byte[16 * 1024];
+                int n;
+                while ((n = in.read(buf)) > 0) bo.write(buf, 0, n);
+                return bo.toByteArray();
+            } catch (Exception e) { return null; }
+            finally { try { if (in != null) in.close(); } catch (Exception ignored) { } }
+        }
+
+        /** 安全审查 P0-2：会话内首次执行 Termux 命令前弹原生确认框（显示命令前 200 字）。
+         *  JS 桥跑在非 UI 线程，这里用 latch 等用户选择；拒绝或超时返回 false。 */
+        private boolean ensureTermuxConfirmed(String script) {
+            if (termuxConfirmed) return true;
+            if (termuxConfirming) return false;          // 并发调用：第二次直接拒绝，避免堆叠弹窗
+            termuxConfirming = true;
+            final boolean[] yes = new boolean[]{false};
+            final java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(1);
+            final String preview = script.length() > 200 ? script.substring(0, 200) + "…" : script;
+            runOnUiThread(new Runnable() {
+                @Override public void run() {
+                    try {
+                        new AlertDialog.Builder(MainActivity.this)
+                                .setTitle("允许在 Termux 中执行命令？")
+                                .setMessage("本次会话首次执行外部命令，请确认内容：\n\n" + preview)
+                                .setPositiveButton("允许（本次会话）", (d, w) -> { yes[0] = true; latch.countDown(); })
+                                .setNegativeButton("拒绝", (d, w) -> { yes[0] = false; latch.countDown(); })
+                                .setCancelable(false)
+                                .show();
+                    } catch (Exception e) {
+                        alog("execTermux confirm EX " + e);
+                        latch.countDown();
+                    }
+                }
+            });
+            try { latch.await(90, java.util.concurrent.TimeUnit.SECONDS); }
+            catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+            termuxConfirming = false;
+            if (yes[0]) { termuxConfirmed = true; alog("execTermux: confirmed by user"); }
+            return yes[0];
         }
 
         /** v5.0：删除用户插件文件（仅 `/sdcard/QingCode/plugins/<name>.js`，防路径穿越） */
@@ -1393,6 +1540,20 @@ public class MainActivity extends Activity {
 
         @JavascriptInterface
         public boolean writeProjectFile(String path, String content, String encoding) {
+            /* 安全审查 P0-2：插件目录只能经 writePlugin（安装流程）写入。
+               否则任何能写项目文件的能力都能把 .js 塞进插件目录。 */
+            try {
+                if (path != null) {
+                    File plugins = new File(swapDir(), "plugins").getCanonicalFile();
+                    File target = new File(path).getCanonicalFile();
+                    if (target.getPath().equals(plugins.getPath())
+                            || target.getPath().startsWith(plugins.getPath() + File.separator)) {
+                        lastWriteError = "插件目录只能通过「安装插件」写入";
+                        alog("writeProjectFile: blocked write into plugins dir: " + path);
+                        return false;
+                    }
+                }
+            } catch (Exception ignored) { }
             /* v5.10.0：SAF 走 ContentResolver，不再依赖绝对路径与「所有文件访问」 */
             String[] saf = safSplit(path);
             if (saf != null) {
@@ -1496,10 +1657,29 @@ public class MainActivity extends Activity {
         }
 
         /** v5.6.0：读取单个路径的磁盘签名（size + mtime），用于保存前的外部修改检测。
-         *  返回 "" 表示路径不存在或不在共享存储内；否则返回 {"size":n,"mtime":ms}。 */
+         *  返回 "" 表示路径不存在或不在共享存储内；否则返回 {"size":n,"mtime":ms}。
+         *  v5.11.0：补 SAF 分支——此前 SAF 工作区一律返回 ""，前端 sigOf() 得到 null 后
+         *  直接跳过外部修改冲突检测，等于该模式下的保护失效。 */
         @JavascriptInterface
         public String statFile(String path) {
             try {
+                String[] sp = safSplit(path);
+                if (sp != null) {
+                    Uri tree = safTreeUri(sp[0]);
+                    if (tree == null || sp[1] == null) return "";
+                    String docId = safDocId(tree, sp[1]);
+                    if (docId == null) return "";
+                    Uri doc = DocumentsContract.buildDocumentUriUsingTree(tree, docId);
+                    android.database.Cursor c = getContentResolver().query(doc, SAF_COLS, null, null, null);
+                    if (c == null) return "";
+                    try {
+                        if (!c.moveToFirst()) return "";
+                        JSONObject o = new JSONObject();
+                        o.put("size", c.isNull(3) ? 0L : c.getLong(3));
+                        o.put("mtime", c.isNull(4) ? 0L : c.getLong(4));
+                        return o.toString();
+                    } finally { c.close(); }
+                }
                 File f = new File(path);
                 if (!withinSharedStorage(f) || !f.exists()) return "";
                 JSONObject o = new JSONObject();
@@ -1507,6 +1687,63 @@ public class MainActivity extends Activity {
                 o.put("mtime", f.lastModified());
                 return o.toString();
             } catch (Exception e) { return ""; }
+        }
+
+        /* ---------- v5.11.0：项目内重命名 / 删除真正落到磁盘 ----------
+           此前前端只改 state.files 与标签，重开项目后旧文件又出现、删除也没生效。 */
+
+        /** 同目录改名：普通路径 File.renameTo，SAF 走 DocumentsContract.renameDocument */
+        @JavascriptInterface
+        public boolean renameProjectEntry(String rootPath, String fromRel, String toRel) {
+            try {
+                String f = safeRelativePath(fromRel), t = safeRelativePath(toRel);
+                if (f == null || t == null || f.equals(t)) return false;
+                if (!dirOf(f).equals(dirOf(t))) return false;      // 只支持改名，不做跨目录移动
+                String[] sp = safSplit(rootPath);
+                if (sp != null) {
+                    Uri tree = safTreeUri(sp[0]);
+                    if (tree == null || sp[1] == null) return false;
+                    String full = sp[1].isEmpty() ? f : sp[1] + "/" + f;
+                    String id = safDocId(tree, full);
+                    if (id == null) return false;
+                    Uri doc = DocumentsContract.buildDocumentUriUsingTree(tree, id);
+                    Uri renamed = DocumentsContract.renameDocument(getContentResolver(), doc, nameOf(t));
+                    return renamed != null;
+                }
+                File base = new File(rootPath);
+                File a = new File(base, f), b = new File(base, t);
+                if (!withinSharedStorage(a) || !a.exists() || b.exists()) return false;
+                return a.renameTo(b);
+            } catch (Exception e) {
+                alog("renameProjectEntry EX " + e);
+                return false;
+            }
+        }
+
+        /** 删除文件或整棵目录（普通路径 / SAF） */
+        @JavascriptInterface
+        public boolean deleteProjectEntry(String rootPath, String rel) {
+            try {
+                String r = safeRelativePath(rel);
+                if (r == null) return false;
+                String[] sp = safSplit(rootPath);
+                if (sp != null) {
+                    Uri tree = safTreeUri(sp[0]);
+                    if (tree == null || sp[1] == null) return false;
+                    String full = sp[1].isEmpty() ? r : sp[1] + "/" + r;
+                    String id = safDocId(tree, full);
+                    if (id == null) return false;
+                    Uri doc = DocumentsContract.buildDocumentUriUsingTree(tree, id);
+                    return DocumentsContract.deleteDocument(getContentResolver(), doc);
+                }
+                File target = new File(new File(rootPath), r);
+                if (!withinSharedStorage(target) || !target.exists()) return false;
+                deleteRecursive(target);
+                return !target.exists();
+            } catch (Exception e) {
+                alog("deleteProjectEntry EX " + e);
+                return false;
+            }
         }
 
         /** v5.5.0：启动恢复工作区前探测目录是否仍可访问（存在且位于共享存储内） */
@@ -1698,6 +1935,40 @@ public class MainActivity extends Activity {
     private int termuxLogOffset = 0;
     private int pollN = 0;
 
+    /** v5.11.1：收尾排空。单次 readChunk 最多 64KB，而「看到退出码就停止轮询并删会话目录」的旧逻辑
+     *  会把还没读到的尾部输出一起删掉（程序短时间内打印 >64KB 后退出必然命中）。
+     *  因此结束前必须把 stdout / stderr 剩余内容推完，再 purge。上限 4MB，避免异常文件拖死退出流程。 */
+    private void drainOutput(File dir) {
+        final int maxBytes = 4 * 1024 * 1024;
+        try {
+            File outF = new File(dir, ".stdout");
+            long[] adv = new long[]{stdoutOffset};
+            int total = 0;
+            String c;
+            while (total < maxBytes) {
+                c = readChunk(outF, adv[0], adv);
+                if (c == null || c.isEmpty()) break;
+                stdoutOffset = adv[0];
+                total += c.length();
+                emitStream(c);
+            }
+        } catch (Exception ignored) { }
+        try {
+            File errF = new File(dir, ".stderr");
+            long[] eadv = new long[]{stderrOffset};
+            int total = 0;
+            String c;
+            while (total < maxBytes) {
+                c = readChunk(errF, eadv[0], eadv);
+                if (c == null || c.isEmpty()) break;
+                stderrOffset = eadv[0];
+                total += c.length();
+                lastErrSentAll = true;
+                emitStreamErr(c);
+            }
+        } catch (Exception ignored) { }
+    }
+
     private void alog(String msg) {
         String ts = new java.text.SimpleDateFormat("HH:mm:ss.SSS", java.util.Locale.US)
                 .format(new java.util.Date());
@@ -1708,12 +1979,25 @@ public class MainActivity extends Activity {
         }
         android.util.Log.i("QingCode", msg);
         try {
-            File f = new File(swapDir(), ".app.log");
-            java.io.FileWriter w = new java.io.FileWriter(f, true);
-            w.write(line + "\n");
-            w.close();
+            /* v5.11.0：日志只追加不轮转，长期使用会把交换目录撑大（每行都 open/close 一次）。
+               超过 1MB 就轮转一次，只保留上一份，导出时两份都可读。
+               v5.11.1：加锁（poll 线程与 UI 线程都会写），并检查 renameTo 结果——
+               失败时不能继续往原文件追加，否则每次进来都会重复删除/重命名。 */
+            synchronized (logFileLock) {
+                File f = new File(swapDir(), ".app.log");
+                if (f.length() > 1024 * 1024) {
+                    File old = new File(swapDir(), ".app.log.1");
+                    if (old.exists()) old.delete();
+                    f.renameTo(old);   // 失败就让下一次再试，不影响本次写入
+                }
+                java.io.FileWriter w = new java.io.FileWriter(f, true);
+                w.write(line + "\n");
+                w.close();
+            }
         } catch (Exception ignored) { }
     }
+
+    private final Object logFileLock = new Object();
 
     private String logsText() {
         synchronized (logBuf) {
@@ -1982,6 +2266,7 @@ public class MainActivity extends Activity {
                 int ce = parseIntSafe(compileExit.trim(), -1);
                 if (ce != 0) {
                     stopPolling();
+                    drainOutput(dir);   // 先把剩余 stderr 推完，再删会话目录
                     alog("poll: compile FAILED exit=" + ce + " stderrLen=" + (err == null ? 0 : err.length()));
                     emitCpp(cppJson("compile", false, ce, "", err == null ? "" : err));
                     purgeRunDir(dir);
@@ -1996,6 +2281,7 @@ public class MainActivity extends Activity {
                 int re = parseIntSafe(runExit.trim(), -1);
                 if (re >= 0 && re <= 255 && runExit.trim().length() <= 4) {
                     stopPolling();
+                    drainOutput(dir);   // 同上：单次读 64KB，尾部可能还没读
                     alog("poll: run finished exit=" + re);
                     emitCpp(cppJson("run", re == 0, re, "", err != null && !lastErrSentAll ? err : ""));
                     purgeRunDir(dir);
@@ -2016,6 +2302,7 @@ public class MainActivity extends Activity {
             // 6. 超时
             if (System.currentTimeMillis() > cppDeadline) {
                 stopPolling();
+                drainOutput(dir);   // 超时前尽量把已产生的输出交给前端
                 alog("poll: TIMEOUT after " + cppTimeoutSec + "s, termuxLogOffset=" + termuxLogOffset);
                 try { writeFile(new File(dir, ".cancel"), "1"); } catch (Exception ignored) { }   // v4.9.4：看门狗即时杀
                 sendRunCommand("kill -9 $(cat " + q(new File(dir, ".prog.pid").getAbsolutePath()) + " 2>/dev/null) 2>/dev/null; "
@@ -2039,6 +2326,15 @@ public class MainActivity extends Activity {
     private long stderrOffset = 0;           // stderr 增量偏移（此前每 200ms 整份重读）
     private final StringBuilder errBuf = new StringBuilder();   // 增量累积，编译失败时交由前端解析
     private volatile String lastWriteError = "";   // v5.10.0：最近一次写失败原因（SAF 用）
+    /* v5.10.1 安全（审查 P0-2）：Termux 命令执行的会话级确认 */
+    private volatile boolean termuxConfirmed = false;
+    private volatile boolean termuxConfirming = false;
+    private static final String PROBE_OUT_NAME = ".env_probe.txt";
+    private static final String TERMUX_PROBE_SCRIPT =
+            "echo py:$(command -v python >/dev/null 2>&1 && echo ok || echo missing);"
+          + "echo cpp:$(command -v clang >/dev/null 2>&1 && echo ok || echo missing);"
+          + "echo src:$(grep -qs \"mirrors.tuna.tsinghua.edu.cn\" \"$PREFIX/etc/apt/sources.list\" && echo ok || echo missing);"
+          + "echo termux:ok";
     private String lastCacheKey = "";        // 上次编译产物缓存键（编译/运行分离）
     private String lastRunTail = "";         // 运行段落脚本（重跑时复用，免去重新编译）
 
@@ -2233,7 +2529,7 @@ public class MainActivity extends Activity {
 
     /** 递归收集工作区文件元数据（与 collectCodeMetaFiles 同口径：跳过隐藏项/构建目录，单文件 ≤1MB，最多 200 个） */
     private void safCollect(Uri tree, String docId, String prefix, StringBuilder arr, int[] n, int depth) {
-        if (n[0] >= 200 || depth > 8) return;
+        if (n[0] >= 200 || depth > 16) return;   // v5.11.1：8 层太浅，深层目录会被静默丢掉
         try {
             Uri children = DocumentsContract.buildChildDocumentsUriUsingTree(tree, docId);
             android.database.Cursor c = getContentResolver().query(children, SAF_COLS, null, null, null);
@@ -2248,7 +2544,9 @@ public class MainActivity extends Activity {
             for (Object[] r : rows) {
                 if (n[0] >= 200) return;
                 String nm = String.valueOf(r[1]);
-                if (nm.startsWith(".") || nm.equals("build") || nm.equals("node_modules")) continue;
+                // 根层 .qingcode.json 是项目配置，需要交给前端；其他隐藏项照旧跳过
+                if (nm.startsWith(".") && !(nm.equals(".qingcode.json") && prefix.isEmpty())) continue;
+                if (nm.equals("build") || nm.equals("node_modules")) continue;
                 String rel = prefix.isEmpty() ? nm : prefix + "/" + nm;
                 if (SAF_DIR.equals(r[2])) { safCollect(tree, String.valueOf(r[0]), rel, arr, n, depth + 1); continue; }
                 long size = (Long) r[3];
@@ -2277,6 +2575,16 @@ public class MainActivity extends Activity {
             out.append(seg);
         }
         return out.length() == 0 ? null : out.toString();
+    }
+
+    private static String dirOf(String rel) {
+        int i = rel.lastIndexOf('/');
+        return i < 0 ? "" : rel.substring(0, i);
+    }
+
+    private static String nameOf(String rel) {
+        int i = rel.lastIndexOf('/');
+        return i < 0 ? rel : rel.substring(i + 1);
     }
 
     private static boolean safeUserFileName(String name) {
@@ -2331,16 +2639,24 @@ public class MainActivity extends Activity {
     /** 从 offset 读到文件末尾，末尾若是不完整的多字节字符则留到下次；next[0] = 下次起始偏移。
      *  按「实际消费的字节数」推进偏移，避免 new String(...) 把半截字符变成 U+FFFD 后
      *  getBytes().length 与实际字节数不等导致的偏移错位（跨块中文乱码/重复的根因）。 */
+    private static final int READ_CHUNK_MAX = 64 * 1024;   // v5.11.0：单次最多读 64KB，避免一次性分配几十 MB
+
     private static String readChunk(File f, long offset, long[] next) {
         try {
             RandomAccessFile raf = new RandomAccessFile(f, "r");
             long len = raf.length();
             if (len <= offset) { raf.close(); next[0] = offset; return ""; }
+            // 输出暴涨时（死循环打印）一次性 new byte[(int)(len-offset)] 会直接 OOM，
+            // 也会把几十 MB 字符串塞进 WebView。按固定块读，剩余部分下一轮继续。
+            int want = (int) Math.min(READ_CHUNK_MAX, len - offset);
             raf.seek(offset);
-            byte[] b = new byte[(int) (len - offset)];
+            byte[] b = new byte[want];
             raf.readFully(b);
             raf.close();
             int n = completeUtf8Prefix(b);
+            /* v5.11.1：整块只含一个多字节字符的前几字节时 n=0，offset 不推进会导致这段输出永久卡住。
+               宁可出现一个替换字符，也不能让轮询原地打转。 */
+            if (n <= 0 && b.length > 0) n = b.length;
             next[0] = offset + n;
             return new String(b, 0, n, "UTF-8");
         } catch (IOException e) {
@@ -2554,7 +2870,10 @@ public class MainActivity extends Activity {
         for (File f : fs) {
             if (n[0] >= 200) return;
             String nm = f.getName();
-            if (nm.startsWith(".") || nm.equals("build") || nm.equals("node_modules")) continue;
+            // 项目根目录的 .qingcode.json 是项目配置，必须让前端拿到；
+            // 其余以 . 开头的项（.git/.vscode/.DS_Store 等）仍然跳过
+            if (nm.startsWith(".") && !(nm.equals(".qingcode.json") && f.isFile() && dir.equals(root))) continue;
+            if (nm.equals("build") || nm.equals("node_modules")) continue;
             if (f.isDirectory()) { collectCodeMetaFiles(root, f, arr, n); continue; }
             if (f.length() > 1024 * 1024) continue;
             if (!nm.matches(".*\\.(py|cpp|cc|cxx|c|h|hpp|hh|txt|md|json|java|js|html|css|xml|csv)$")) continue;
@@ -2574,7 +2893,8 @@ public class MainActivity extends Activity {
         for (File f : fs) {
             if (n[0] >= 200) return;
             String nm = f.getName();
-            if (nm.startsWith(".") || nm.equals("build") || nm.equals("node_modules")) continue;
+            if (nm.startsWith(".") && !(nm.equals(".qingcode.json") && f.isFile() && dir.equals(root))) continue;
+            if (nm.equals("build") || nm.equals("node_modules")) continue;
             if (f.isDirectory()) { collectCodeFiles(root, f, arr, n); continue; }
             if (f.length() > 1024 * 1024) continue;
             if (!nm.matches(".*\\.(py|cpp|cc|cxx|c|h|hpp|hh|txt|md|json|java|js|html|css|xml|csv)$")) continue;   // v4.11.2：与「打开文件」白名单对齐

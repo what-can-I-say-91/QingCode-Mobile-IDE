@@ -95,9 +95,16 @@
       }
       function close() { var el = document.getElementById('nav-panel'); if (el) el.classList.add('hidden'); if (view()) try { E.focus(); } catch (e) {} }
       function open(m, title, initial) {
-        /* v5.6.0：全局搜索 / 全局符号 / 书签需要所有文件内容；按需加载模式下先补读 */
+        /* v5.6.0：全局搜索 / 全局符号 / 书签需要所有文件内容；按需加载模式下先补读
+           v5.11.0：改为分片异步补读，面板先出来，读完后自动重渲染，避免打开面板时卡住 */
         if ((m === 'search' || m === 'gsymbol' || m === 'bookmark') && E.ensureAll) {
-          try { E.ensureAll(); } catch (e) {}
+          try {
+            if (E.ensureAllAsync) {
+              E.ensureAllAsync(function () { if (mode === m) render(); });
+            } else {
+              E.ensureAll();
+            }
+          } catch (e) {}
         }
         mode = m;
         var el = panel();
@@ -166,7 +173,10 @@
               var files = E.files ? E.files() : [];
               var f = files.filter(function (x) { return x.name === fn; })[0];
               var txt = '';
-              if (f) { var arr = String(f.content).split('\n'); txt = (arr[ln - 1] || '').trim().slice(0, 80); }
+              if (f) {
+                if (f.content === null || f.content === undefined) { txt = T('nv_not_loaded', '（未加载）'); }
+                else { var arr = String(f.content).split('\n'); txt = (arr[ln - 1] || '').trim().slice(0, 80); }
+              }
               if (q && (fn + ' ' + txt).toLowerCase().indexOf(q) < 0) return;
               any = true;
               row(fn + ':' + ln, txt, '🔖', function () { E.openFile(fn); setTimeout(function () { E.gotoLine(ln, 1); }, 120); close(); });
@@ -180,6 +190,8 @@
           if (!re) { body.innerHTML = '<div class="nv-empty">' + T('nv_bad_re', '正则表达式无效') + '</div>'; return; }
           var hits = 0;
           (E.files ? E.files() : []).forEach(function (f) {
+            /* v5.11.1：未加载的惰性文件 content 为 null，直接 String() 会搜到假内容 "null" */
+            if (f.content === null || f.content === undefined) return;
             var lines = String(f.content).split('\n');
             for (var i = 0; i < lines.length && hits < 400; i++) {
               re.lastIndex = 0;
@@ -202,8 +214,12 @@
         var re;
         /* 与命中预览保持一致（gi），否则会出现"预览 N 处、只替换一部分" */
         try { re = new RegExp(q, 'gi'); } catch (e) { if (api.meta) api.meta(T('nv_bad_re', '正则表达式无效')); return; }
-        var total = 0, filesChanged = 0;
+        var total = 0, filesChanged = 0, skipped = 0;
         (E.files ? E.files() : []).forEach(function (f) {
+          /* v5.11.1：惰性模式未加载的文件 content 是 null，String(null)==="null"。
+             只要正则能命中 l/u/n，就会把 "null" 当成正文写回并落盘，真实文件被覆盖。
+             未加载的文件一律跳过（预览同样过滤），绝不参与替换。 */
+          if (f.content === null || f.content === undefined) { skipped++; return; }
           var before = String(f.content);
           re.lastIndex = 0;
           var hit = (before.match(re) || []).length;
@@ -213,7 +229,11 @@
           if (after !== before) { E.setFileContent(f.name, after); filesChanged++; total += hit; }
         });
         if (E.saveAll) E.saveAll();
-        if (api.meta) api.meta(T('nv_replaced', '已替换') + '：' + total + ' · ' + filesChanged + ' ' + T('nv_files', '个文件'));
+        if (api.meta) {
+          var msg = T('nv_replaced', '已替换') + '：' + total + ' · ' + filesChanged + ' ' + T('nv_files', '个文件');
+          if (skipped) msg += '（' + skipped + ' ' + T('nv_skipped', '个未加载文件已跳过') + '）';
+          api.meta(msg);
+        }
         render();
       }
 
